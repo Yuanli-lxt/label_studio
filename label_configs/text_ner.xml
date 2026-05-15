@@ -1,0 +1,8 @@
+<View>
+  <Text name="text" value="$text"/>
+  <Labels name="ner_label" toName="text">
+    <Label value="ORG" background="#4c6ef5"/>
+    <Label value="PERSON" background="#51cf66"/>
+    <Label value="LOC" background="#fcc419"/>
+  </Labels>
+</View>

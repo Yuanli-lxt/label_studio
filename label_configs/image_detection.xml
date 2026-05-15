@@ -1,0 +1,6 @@
+<View>
+  <Image name="image" value="$image"/>
+  <RectangleLabels name="bbox_label" toName="image">
+    <Label value="Object" background="#ff6b6b"/>
+  </RectangleLabels>
+</View>

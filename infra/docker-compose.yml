@@ -1,0 +1,187 @@
+name: label-platform
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ../demo_data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ../demo_data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - ../demo_data/minio:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  ml-backend:
+    build:
+      context: ../services/ml-backend
+    restart: unless-stopped
+    environment:
+      PORT: "9090"
+      SERVICE_NAME: ml-backend
+      MODEL_STATE_PATH: /model-state/current_model.json
+      MODEL_ARTIFACTS_DIR: /model-state/text_classifier
+      TEXT_MODEL_ARTIFACTS_DIR: /model-state/text_classifier
+      IMAGE_MODEL_ARTIFACTS_DIR: /model-state/image_classifier
+      IMAGE_LOCAL_FILES_ROOT: /demo-local-files
+      TRAINER_URL: http://trainer:9091/train
+      TRAINER_WEBHOOK_URL: http://trainer:9091/webhook/label-studio
+      TRAINER_TIMEOUT_SECONDS: "2.0"
+      TEXT_CLS_UNCERTAIN_THRESHOLD: "${TEXT_CLS_UNCERTAIN_THRESHOLD:-0.60}"
+      TEXT_CLS_UNCERTAIN_MARGIN: "${TEXT_CLS_UNCERTAIN_MARGIN:-0.10}"
+      IMAGE_CLS_UNCERTAIN_THRESHOLD: "${IMAGE_CLS_UNCERTAIN_THRESHOLD:-0.60}"
+    ports:
+      - "${ML_BACKEND_PORT:-9090}:9090"
+    volumes:
+      - ../demo_data/ml-backend:/data
+      - ../demo_data/model_state:/model-state
+      - ../demo_data/local-files:/demo-local-files:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9090/health', timeout=2).status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  trainer:
+    build:
+      context: ../services/trainer
+    restart: unless-stopped
+    environment:
+      PORT: "9091"
+      SERVICE_NAME: trainer
+      MODEL_STATE_PATH: /model-state/current_model.json
+      MODEL_ARTIFACTS_DIR: /model-state/text_classifier
+      TEXT_MODEL_ARTIFACTS_DIR: /model-state/text_classifier
+      IMAGE_MODEL_ARTIFACTS_DIR: /model-state/image_classifier
+      IMAGE_LOCAL_FILES_ROOT: /demo-local-files
+      TRAINING_DATASET_EVENTS_PATH: /model-state/text_classifier/training_dataset_events.jsonl
+      TRAINING_EVENT_LOG_PATH: /model-state/training_events.jsonl
+      TEXT_CLS_MIN_TOTAL_SAMPLES: "${TEXT_CLS_MIN_TOTAL_SAMPLES:-8}"
+      TEXT_CLS_MIN_PER_CLASS_SAMPLES: "${TEXT_CLS_MIN_PER_CLASS_SAMPLES:-3}"
+      TEXT_CLS_MAX_IMBALANCE_RATIO: "${TEXT_CLS_MAX_IMBALANCE_RATIO:-3.0}"
+      TEXT_CLS_EVAL_SPLIT_RATIO: "${TEXT_CLS_EVAL_SPLIT_RATIO:-0.25}"
+      TEXT_CLS_MIN_EVAL_SAMPLES: "${TEXT_CLS_MIN_EVAL_SAMPLES:-2}"
+      TEXT_CLS_UNCERTAIN_THRESHOLD: "${TEXT_CLS_UNCERTAIN_THRESHOLD:-0.60}"
+      IMAGE_CLS_MIN_TOTAL_SAMPLES: "${IMAGE_CLS_MIN_TOTAL_SAMPLES:-6}"
+      IMAGE_CLS_MIN_PER_CLASS_SAMPLES: "${IMAGE_CLS_MIN_PER_CLASS_SAMPLES:-2}"
+      IMAGE_CLS_MAX_IMBALANCE_RATIO: "${IMAGE_CLS_MAX_IMBALANCE_RATIO:-3.0}"
+      IMAGE_CLS_EVAL_SPLIT_RATIO: "${IMAGE_CLS_EVAL_SPLIT_RATIO:-0.25}"
+      IMAGE_CLS_MIN_EVAL_SAMPLES: "${IMAGE_CLS_MIN_EVAL_SAMPLES:-2}"
+      IMAGE_CLS_UNCERTAIN_THRESHOLD: "${IMAGE_CLS_UNCERTAIN_THRESHOLD:-0.60}"
+      IMAGE_CLS_EVAL_MANIFEST_PATH: "${IMAGE_CLS_EVAL_MANIFEST_PATH:-/demo-tasks/image_classification_eval_manifest.json}"
+      IMAGE_TRAINING_CANDIDATES_PATH: "${IMAGE_TRAINING_CANDIDATES_PATH:-/demo-tasks/image_classification_training_candidates.jsonl}"
+      LABEL_STUDIO_URL: "${LABEL_STUDIO_URL:-http://label-studio:8080}"
+      LABEL_STUDIO_API_TOKEN: "${LABEL_STUDIO_API_TOKEN:-}"
+      LABEL_STUDIO_TIMEOUT_SECONDS: "${LABEL_STUDIO_TIMEOUT_SECONDS:-5.0}"
+    ports:
+      - "${TRAINER_PORT:-9091}:9091"
+    volumes:
+      - ../demo_data/trainer:/data
+      - ../demo_data/tasks:/demo-tasks
+      - ../demo_data/model_state:/model-state
+      - ../demo_data/local-files:/demo-local-files:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9091/health', timeout=2).status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  label-studio:
+    image: heartexlabs/label-studio:latest
+    restart: unless-stopped
+    user: "${LABEL_STUDIO_UID:-1000}:0"
+    ports:
+      - "${LABEL_STUDIO_PORT:-18080}:8080"
+    environment:
+      DJANGO_DB: default
+      POSTGRE_NAME: ${POSTGRES_DB}
+      POSTGRE_USER: ${POSTGRES_USER}
+      POSTGRE_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRE_HOST: postgres
+      POSTGRE_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      LABEL_STUDIO_HOST: ${LABEL_STUDIO_HOST}
+      LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED: ${LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED}
+      LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT: ${LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT}
+      # Keep unprefixed variants for compatibility with LS settings that read LOCAL_FILES_* directly.
+      LOCAL_FILES_SERVING_ENABLED: ${LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED}
+      LOCAL_FILES_DOCUMENT_ROOT: ${LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT}
+      LABEL_STUDIO_BASE_DATA_DIR: /label-studio/data
+    volumes:
+      - ../demo_data/label-studio:/label-studio/data
+      - ../demo_data/local-files:/label-studio/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      ml-backend:
+        condition: service_healthy
+      trainer:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).status == 200 else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+      start_period: 40s

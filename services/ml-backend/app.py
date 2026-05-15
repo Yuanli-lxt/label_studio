@@ -1,0 +1,1012 @@
+import json
+import os
+import re
+import threading
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
+
+import joblib
+import numpy as np
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - handled by fallback path
+    Image = None
+
+SERVICE_NAME = os.getenv("SERVICE_NAME", "ml-backend")
+PORT = int(os.getenv("PORT", "9090"))
+MODEL_STATE_PATH = os.getenv("MODEL_STATE_PATH", "/model-state/current_model.json")
+TEXT_MODEL_ARTIFACTS_DIR = os.getenv(
+    "TEXT_MODEL_ARTIFACTS_DIR",
+    os.getenv("MODEL_ARTIFACTS_DIR", "/model-state/text_classifier"),
+)
+IMAGE_MODEL_ARTIFACTS_DIR = os.getenv("IMAGE_MODEL_ARTIFACTS_DIR", "/model-state/image_classifier")
+IMAGE_LOCAL_FILES_ROOT = os.getenv("IMAGE_LOCAL_FILES_ROOT", "/demo-local-files")
+TRAINER_URL = os.getenv("TRAINER_URL", "http://trainer:9091/train")
+TRAINER_WEBHOOK_URL = os.getenv("TRAINER_WEBHOOK_URL", "http://trainer:9091/webhook/label-studio")
+TRAINER_TIMEOUT_SECONDS = float(os.getenv("TRAINER_TIMEOUT_SECONDS", "2.0"))
+
+TEXT_CLS_UNCERTAIN_THRESHOLD = float(os.getenv("TEXT_CLS_UNCERTAIN_THRESHOLD", "0.60"))
+TEXT_CLS_UNCERTAIN_MARGIN = float(os.getenv("TEXT_CLS_UNCERTAIN_MARGIN", "0.10"))
+IMAGE_CLS_UNCERTAIN_THRESHOLD = float(os.getenv("IMAGE_CLS_UNCERTAIN_THRESHOLD", "0.60"))
+
+DEFAULT_IMAGE_WIDTH = 320
+DEFAULT_IMAGE_HEIGHT = 240
+
+_TEXT_CLASSIFIER_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "classifier.joblib")
+_TEXT_VECTORIZER_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "vectorizer.joblib")
+_TEXT_METADATA_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "metadata.json")
+_IMAGE_CLASSIFIER_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "classifier.joblib")
+_IMAGE_METADATA_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "metadata.json")
+
+_TEXT_MODEL_LOCK = threading.Lock()
+_TEXT_MODEL_CACHE = {
+    "fingerprint": None,
+    "bundle": None,
+}
+_IMAGE_MODEL_LOCK = threading.Lock()
+_IMAGE_MODEL_CACHE = {
+    "fingerprint": None,
+    "bundle": None,
+}
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _default_state():
+    return {
+        "model_version": "demo-rule-v1",
+        "training_run": 0,
+        "updated_at": "1970-01-01T00:00:00Z",
+        "source": "ml-backend-default",
+        "text_classifier": {
+            "active": False,
+            "model_version": None,
+            "trained_at": None,
+            "metadata_path": _TEXT_METADATA_PATH,
+        },
+        "image_classifier": {
+            "active": False,
+            "model_version": None,
+            "trained_at": None,
+            "metadata_path": _IMAGE_METADATA_PATH,
+        },
+        "behavior": {
+            "image_positive_tokens": ["blue", "product", "object", "demo_blue"],
+            "image_detection": {
+                "x": 20.0,
+                "y": 22.0,
+                "width": 45.0,
+                "height": 45.0,
+                "score": 0.74,
+            },
+            "text_positive_tokens": ["love", "great", "good", "helpful", "excellent"],
+            "ner_keywords": {
+                "openai": "ORG",
+                "alice": "PERSON",
+                "paris": "LOC",
+                "berlin": "LOC",
+            },
+            "score_boost": 0.0,
+        },
+    }
+
+
+def _deepcopy_json(obj):
+    return json.loads(json.dumps(obj))
+
+
+def _ensure_parent(path):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+
+def _load_model_state():
+    default_state = _default_state()
+    if not os.path.exists(MODEL_STATE_PATH):
+        _ensure_parent(MODEL_STATE_PATH)
+        with open(MODEL_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(default_state, f, indent=2)
+        return default_state
+
+    try:
+        with open(MODEL_STATE_PATH, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return default_state
+
+    if not isinstance(loaded, dict):
+        return default_state
+
+    state = _deepcopy_json(default_state)
+    state.update(loaded)
+    if isinstance(loaded.get("behavior"), dict):
+        state["behavior"].update(loaded["behavior"])
+    if isinstance(loaded.get("text_classifier"), dict):
+        state["text_classifier"].update(loaded["text_classifier"])
+    if isinstance(loaded.get("image_classifier"), dict):
+        state["image_classifier"].update(loaded["image_classifier"])
+    return state
+
+
+def _load_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _round4(value):
+    return round(float(value), 4)
+
+
+def _artifact_fingerprint(paths):
+    if not all(os.path.exists(path) for path in paths):
+        return None
+
+    try:
+        return tuple((path, os.path.getmtime(path)) for path in paths)
+    except OSError:
+        return None
+
+
+def _load_text_classifier_bundle():
+    fingerprint = _artifact_fingerprint((_TEXT_CLASSIFIER_PATH, _TEXT_VECTORIZER_PATH, _TEXT_METADATA_PATH))
+    if fingerprint is None:
+        return None
+
+    with _TEXT_MODEL_LOCK:
+        if _TEXT_MODEL_CACHE["fingerprint"] == fingerprint and _TEXT_MODEL_CACHE["bundle"]:
+            return _TEXT_MODEL_CACHE["bundle"]
+
+        metadata = _load_json(_TEXT_METADATA_PATH)
+        if not isinstance(metadata, dict):
+            _TEXT_MODEL_CACHE["fingerprint"] = None
+            _TEXT_MODEL_CACHE["bundle"] = None
+            return None
+
+        try:
+            classifier = joblib.load(_TEXT_CLASSIFIER_PATH)
+            vectorizer = joblib.load(_TEXT_VECTORIZER_PATH)
+        except Exception:
+            _TEXT_MODEL_CACHE["fingerprint"] = None
+            _TEXT_MODEL_CACHE["bundle"] = None
+            return None
+
+        bundle = {
+            "classifier": classifier,
+            "vectorizer": vectorizer,
+            "metadata": metadata,
+        }
+        _TEXT_MODEL_CACHE["fingerprint"] = fingerprint
+        _TEXT_MODEL_CACHE["bundle"] = bundle
+        return bundle
+
+
+def _load_image_classifier_bundle():
+    fingerprint = _artifact_fingerprint((_IMAGE_CLASSIFIER_PATH, _IMAGE_METADATA_PATH))
+    if fingerprint is None:
+        return None
+
+    with _IMAGE_MODEL_LOCK:
+        if _IMAGE_MODEL_CACHE["fingerprint"] == fingerprint and _IMAGE_MODEL_CACHE["bundle"]:
+            return _IMAGE_MODEL_CACHE["bundle"]
+
+        metadata = _load_json(_IMAGE_METADATA_PATH)
+        if not isinstance(metadata, dict):
+            _IMAGE_MODEL_CACHE["fingerprint"] = None
+            _IMAGE_MODEL_CACHE["bundle"] = None
+            return None
+
+        try:
+            classifier = joblib.load(_IMAGE_CLASSIFIER_PATH)
+        except Exception:
+            _IMAGE_MODEL_CACHE["fingerprint"] = None
+            _IMAGE_MODEL_CACHE["bundle"] = None
+            return None
+
+        bundle = {
+            "classifier": classifier,
+            "metadata": metadata,
+        }
+        _IMAGE_MODEL_CACHE["fingerprint"] = fingerprint
+        _IMAGE_MODEL_CACHE["bundle"] = bundle
+        return bundle
+
+
+def _local_tag(tag):
+    return tag.split("}", 1)[-1]
+
+
+def _read_json_body(handler):
+    length = int(handler.headers.get("Content-Length", "0"))
+    body = handler.rfile.read(length) if length else b"{}"
+    if not body:
+        return {}
+    try:
+        return json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _send_json(handler, status_code, payload):
+    content = json.dumps(payload).encode("utf-8")
+    handler.send_response(status_code)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(content)))
+    handler.end_headers()
+    handler.wfile.write(content)
+
+
+def _extract_control(root, control_tag, default_name, default_to_name):
+    child_tag = "Choice" if control_tag == "Choices" else "Label"
+    for node in root.iter():
+        if _local_tag(node.tag) != control_tag:
+            continue
+        labels = []
+        for child in node:
+            if _local_tag(child.tag) != child_tag:
+                continue
+            value = child.attrib.get("value")
+            if value:
+                labels.append(value)
+        return {
+            "name": node.attrib.get("name", default_name),
+            "to_name": node.attrib.get("toName", default_to_name),
+            "labels": labels,
+        }
+    return None
+
+
+def _parse_label_config(label_config):
+    parsed = {
+        "image_name": "image",
+        "text_name": "text",
+        "choices": None,
+        "rectanglelabels": None,
+        "labels": None,
+    }
+
+    if not label_config:
+        return parsed
+
+    try:
+        root = ET.fromstring(label_config)
+    except ET.ParseError:
+        return parsed
+
+    for node in root.iter():
+        node_type = _local_tag(node.tag)
+        if node_type == "Image" and parsed["image_name"] == "image":
+            parsed["image_name"] = node.attrib.get("name", "image")
+        if node_type == "Text" and parsed["text_name"] == "text":
+            parsed["text_name"] = node.attrib.get("name", "text")
+
+    parsed["choices"] = _extract_control(
+        root,
+        "Choices",
+        default_name="choices",
+        default_to_name=parsed["image_name"],
+    )
+    parsed["rectanglelabels"] = _extract_control(
+        root,
+        "RectangleLabels",
+        default_name="bbox_label",
+        default_to_name=parsed["image_name"],
+    )
+    parsed["labels"] = _extract_control(
+        root,
+        "Labels",
+        default_name="ner_label",
+        default_to_name=parsed["text_name"],
+    )
+
+    return parsed
+
+
+def _infer_mode(parsed, tasks):
+    image_name = parsed["image_name"]
+    text_name = parsed["text_name"]
+
+    rect = parsed["rectanglelabels"]
+    choices = parsed["choices"]
+    labels = parsed["labels"]
+
+    if rect and rect.get("to_name") == image_name:
+        return "image_detection"
+    if labels and labels.get("to_name") == text_name:
+        return "text_ner"
+    if choices and choices.get("to_name") == image_name:
+        return "image_classification"
+    if choices and choices.get("to_name") == text_name:
+        return "text_classification"
+
+    if tasks:
+        data = tasks[0].get("data", {})
+        if "image" in data:
+            return "image_classification"
+        if "text" in data:
+            return "text_classification"
+
+    return "unknown"
+
+
+def _pick_positive_label(labels):
+    if not labels:
+        return "Positive"
+
+    preferred = ["positive", "product", "object", "yes", "present"]
+    for label in labels:
+        low = label.lower()
+        if any(token in low for token in preferred):
+            return label
+
+    return labels[0]
+
+
+def _pick_negative_label(labels):
+    if not labels:
+        return "Negative"
+
+    preferred = ["negative", "other", "none", "no", "absent"]
+    for label in labels:
+        low = label.lower()
+        if any(token in low for token in preferred):
+            return label
+
+    if len(labels) >= 2:
+        return labels[1]
+
+    return labels[0]
+
+
+def _clamp_score(value):
+    if value < 0.01:
+        return 0.01
+    if value > 0.99:
+        return 0.99
+    return round(value, 3)
+
+
+def _score(base_score, state):
+    boost = float(state.get("behavior", {}).get("score_boost", 0.0))
+    return _clamp_score(base_score + boost)
+
+
+def _safe_join_under_root(root, relative_path):
+    root_abs = os.path.abspath(root)
+    candidate = os.path.abspath(os.path.join(root_abs, relative_path.lstrip("/")))
+    if candidate == root_abs or candidate.startswith(root_abs + os.sep):
+        return candidate
+    return None
+
+
+def _resolve_image_file_path(image_value, local_root=IMAGE_LOCAL_FILES_ROOT):
+    if image_value is None:
+        return None
+
+    raw = str(image_value).strip()
+    if not raw:
+        return None
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return None
+
+    parsed = urlparse(raw)
+    if raw.startswith("/data/local-files/"):
+        rel = parse_qs(parsed.query).get("d", [None])[0]
+        if rel:
+            candidate = _safe_join_under_root(local_root, rel)
+            if candidate and os.path.exists(candidate):
+                return candidate
+
+    if raw.startswith("/label-studio/files/"):
+        rel = raw[len("/label-studio/files/") :]
+        candidate = _safe_join_under_root(local_root, rel)
+        if candidate and os.path.exists(candidate):
+            return candidate
+
+    if raw.startswith("/"):
+        if os.path.exists(raw):
+            return raw
+
+    candidate = _safe_join_under_root(local_root, raw)
+    if candidate and os.path.exists(candidate):
+        return candidate
+
+    if "/images/" in raw:
+        rel = raw.split("/images/", 1)[1]
+        candidate = _safe_join_under_root(local_root, os.path.join("images", rel))
+        if candidate and os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+def _extract_image_feature_vector(image_path):
+    if Image is None:
+        raise ValueError("Pillow is required for trained image classifier inference")
+    with Image.open(image_path) as img:
+        rgb = img.convert("RGB")
+        width, height = rgb.size
+        arr = np.asarray(rgb, dtype=np.float32) / 255.0
+
+    mean_rgb = arr.mean(axis=(0, 1))
+    std_rgb = arr.std(axis=(0, 1))
+    luminance = (0.299 * arr[:, :, 0]) + (0.587 * arr[:, :, 1]) + (0.114 * arr[:, :, 2])
+
+    hist_features = []
+    for channel in range(3):
+        hist, _ = np.histogram(arr[:, :, channel], bins=8, range=(0.0, 1.0), density=True)
+        hist_features.extend(hist.tolist())
+
+    aspect_ratio = (float(width) / float(height)) if height else 1.0
+    features = [
+        float(width) / 1000.0,
+        float(height) / 1000.0,
+        aspect_ratio,
+        float(mean_rgb[0]),
+        float(mean_rgb[1]),
+        float(mean_rgb[2]),
+        float(std_rgb[0]),
+        float(std_rgb[1]),
+        float(std_rgb[2]),
+        float(luminance.mean()),
+        float(luminance.std()),
+    ]
+    features.extend(float(item) for item in hist_features)
+    return np.asarray(features, dtype=np.float32)
+
+
+def _predict_with_trained_image_model(task, choices, bundle):
+    classifier = bundle["classifier"]
+    metadata = bundle["metadata"]
+
+    image_value = task.get("data", {}).get("image")
+    image_path = _resolve_image_file_path(image_value)
+    if not image_path:
+        return None
+
+    try:
+        features = _extract_image_feature_vector(image_path).reshape(1, -1)
+    except Exception:
+        return None
+
+    probabilities = classifier.predict_proba(features)[0]
+    label_names = [str(item) for item in classifier.classes_]
+    probability_items = [
+        {"label": label_names[idx], "probability": _round4(probabilities[idx])}
+        for idx in range(len(label_names))
+    ]
+    probability_items.sort(key=lambda item: item["probability"], reverse=True)
+
+    predicted_raw = probability_items[0]["label"]
+    labels = choices.get("labels") or metadata.get("labels") or [predicted_raw]
+    label = _normalize_predicted_label(predicted_raw, labels)
+    top_probability = float(probability_items[0]["probability"])
+
+    confidence_details = {
+        "prediction_source": "trained-image-classifier",
+        "confidence": _clamp_score(top_probability),
+        "confidence_bucket": _confidence_bucket(top_probability),
+        "uncertain": top_probability < IMAGE_CLS_UNCERTAIN_THRESHOLD,
+        "uncertainty_reason": {
+            "threshold": IMAGE_CLS_UNCERTAIN_THRESHOLD,
+            "low_confidence": top_probability < IMAGE_CLS_UNCERTAIN_THRESHOLD,
+        },
+        "top_probabilities": probability_items,
+        "image_path": image_path,
+    }
+    return label, _clamp_score(top_probability), metadata, confidence_details
+
+
+def _image_classification(task, parsed, state):
+    choices = parsed["choices"] or {
+        "name": "image_label",
+        "to_name": parsed["image_name"],
+        "labels": ["Product", "Other"],
+    }
+
+    bundle = _load_image_classifier_bundle()
+    if bundle:
+        trained_prediction = _predict_with_trained_image_model(task, choices, bundle)
+    else:
+        trained_prediction = None
+
+    if trained_prediction:
+        label, score_value, metadata, confidence_details = trained_prediction
+        model_version = metadata.get("model_version") or state["model_version"]
+        prediction_source = "trained-image-classifier"
+    else:
+        image_value = str(task.get("data", {}).get("image", "")).lower()
+        caption_value = str(task.get("data", {}).get("caption", "")).lower()
+        combined = f"{image_value} {caption_value}"
+
+        tokens = state.get("behavior", {}).get("image_positive_tokens", [])
+        if not isinstance(tokens, list):
+            tokens = []
+        tokens = [str(token).lower() for token in tokens]
+
+        likely_positive = any(token in combined for token in tokens)
+        labels = choices.get("labels") or ["Product", "Other"]
+        label = _pick_positive_label(labels) if likely_positive else _pick_negative_label(labels)
+        score_value = _score(0.87, state)
+        model_version = state["model_version"]
+        prediction_source = "demo-rule-fallback"
+        confidence_details = {
+            "prediction_source": prediction_source,
+            "confidence": score_value,
+            "confidence_bucket": _confidence_bucket(score_value),
+            "uncertain": False,
+            "uncertainty_reason": {
+                "threshold": IMAGE_CLS_UNCERTAIN_THRESHOLD,
+                "low_confidence": False,
+            },
+            "top_probabilities": [],
+            "image_path": _resolve_image_file_path(task.get("data", {}).get("image")),
+        }
+
+    result = {
+        "id": f"{task.get('id', 'task')}_cls",
+        "from_name": choices["name"],
+        "to_name": choices["to_name"],
+        "type": "choices",
+        "value": {"choices": [label]},
+    }
+
+    return {
+        "model_version": model_version,
+        "score": score_value,
+        "result": [result],
+        "prediction_source": prediction_source,
+        "confidence": confidence_details,
+    }
+
+
+def _image_detection(task, parsed, state):
+    rect = parsed["rectanglelabels"] or {
+        "name": "bbox_label",
+        "to_name": parsed["image_name"],
+        "labels": ["Object"],
+    }
+
+    detection = state.get("behavior", {}).get("image_detection", {})
+    if not isinstance(detection, dict):
+        detection = {}
+
+    label = (rect.get("labels") or ["Object"])[0]
+    result = {
+        "id": f"{task.get('id', 'task')}_bbox",
+        "from_name": rect["name"],
+        "to_name": rect["to_name"],
+        "type": "rectanglelabels",
+        "original_width": DEFAULT_IMAGE_WIDTH,
+        "original_height": DEFAULT_IMAGE_HEIGHT,
+        "image_rotation": 0,
+        "value": {
+            "rotation": 0,
+            "x": float(detection.get("x", 20.0)),
+            "y": float(detection.get("y", 22.0)),
+            "width": float(detection.get("width", 45.0)),
+            "height": float(detection.get("height", 45.0)),
+            "rectanglelabels": [label],
+        },
+    }
+
+    base_score = float(detection.get("score", 0.74))
+    return {
+        "model_version": state["model_version"],
+        "score": _score(base_score, state),
+        "result": [result],
+    }
+
+
+def _normalize_predicted_label(predicted, supported_labels):
+    if not supported_labels:
+        return predicted
+
+    for label in supported_labels:
+        if label == predicted:
+            return label
+
+    low_pred = str(predicted).lower()
+    for label in supported_labels:
+        if str(label).lower() == low_pred:
+            return label
+
+    return supported_labels[0]
+
+
+def _confidence_bucket(score):
+    if score >= 0.85:
+        return "high"
+    if score >= 0.65:
+        return "medium"
+    return "low"
+
+
+def _predict_with_trained_text_model(text, choices, bundle):
+    classifier = bundle["classifier"]
+    vectorizer = bundle["vectorizer"]
+    metadata = bundle["metadata"]
+
+    features = vectorizer.transform([text])
+    probabilities = classifier.predict_proba(features)[0]
+
+    label_names = [str(item) for item in classifier.classes_]
+    probability_items = [
+        {"label": label_names[idx], "probability": _round4(probabilities[idx])}
+        for idx in range(len(label_names))
+    ]
+    probability_items.sort(key=lambda item: item["probability"], reverse=True)
+
+    predicted_raw = probability_items[0]["label"]
+    labels = choices.get("labels") or metadata.get("labels") or [predicted_raw]
+    label = _normalize_predicted_label(predicted_raw, labels)
+
+    top_probability = float(probability_items[0]["probability"])
+    second_probability = float(probability_items[1]["probability"]) if len(probability_items) > 1 else 0.0
+    margin = top_probability - second_probability
+
+    uncertain = bool(
+        top_probability < TEXT_CLS_UNCERTAIN_THRESHOLD or margin < TEXT_CLS_UNCERTAIN_MARGIN
+    )
+
+    details = {
+        "prediction_source": "trained-text-classifier",
+        "confidence": _clamp_score(top_probability),
+        "confidence_bucket": _confidence_bucket(top_probability),
+        "uncertain": uncertain,
+        "uncertainty_reason": {
+            "threshold": TEXT_CLS_UNCERTAIN_THRESHOLD,
+            "margin_threshold": TEXT_CLS_UNCERTAIN_MARGIN,
+            "observed_margin": _round4(margin),
+            "low_confidence": top_probability < TEXT_CLS_UNCERTAIN_THRESHOLD,
+            "small_margin": margin < TEXT_CLS_UNCERTAIN_MARGIN,
+        },
+        "top_probabilities": probability_items,
+    }
+
+    return label, _clamp_score(top_probability), metadata, details
+
+
+def _text_classification(task, parsed, state):
+    choices = parsed["choices"] or {
+        "name": "text_label",
+        "to_name": parsed["text_name"],
+        "labels": ["Positive", "Negative"],
+    }
+
+    text = str(task.get("data", {}).get("text", ""))
+
+    bundle = _load_text_classifier_bundle()
+    if bundle:
+        label, score_value, metadata, confidence_details = _predict_with_trained_text_model(text, choices, bundle)
+        model_version = metadata.get("model_version") or state["model_version"]
+        prediction_source = "trained-text-classifier"
+    else:
+        low = text.lower()
+        positive_tokens = state.get("behavior", {}).get("text_positive_tokens", [])
+        if not isinstance(positive_tokens, list):
+            positive_tokens = []
+        positive_tokens = [str(token).lower() for token in positive_tokens]
+
+        positive = any(token in low for token in positive_tokens)
+
+        labels = choices.get("labels") or ["Positive", "Negative"]
+        label = _pick_positive_label(labels) if positive else _pick_negative_label(labels)
+        score_value = _score(0.83, state)
+        model_version = state["model_version"]
+        prediction_source = "demo-rule-fallback"
+        confidence_details = {
+            "prediction_source": prediction_source,
+            "confidence": score_value,
+            "confidence_bucket": _confidence_bucket(score_value),
+            "uncertain": False,
+            "uncertainty_reason": {
+                "threshold": TEXT_CLS_UNCERTAIN_THRESHOLD,
+                "margin_threshold": TEXT_CLS_UNCERTAIN_MARGIN,
+                "observed_margin": None,
+                "low_confidence": False,
+                "small_margin": False,
+            },
+            "top_probabilities": [],
+        }
+
+    result = {
+        "id": f"{task.get('id', 'task')}_txt_cls",
+        "from_name": choices["name"],
+        "to_name": choices["to_name"],
+        "type": "choices",
+        "value": {"choices": [label]},
+    }
+
+    return {
+        "model_version": model_version,
+        "score": score_value,
+        "result": [result],
+        "prediction_source": prediction_source,
+        "confidence": confidence_details,
+    }
+
+
+def _find_spans(text, state):
+    keyword_map = state.get("behavior", {}).get("ner_keywords", {})
+    if not isinstance(keyword_map, dict) or not keyword_map:
+        keyword_map = {
+            "openai": "ORG",
+            "alice": "PERSON",
+            "paris": "LOC",
+            "berlin": "LOC",
+        }
+
+    found = []
+    for keyword, label in keyword_map.items():
+        pattern = r"\b" + re.escape(str(keyword)) + r"\b"
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            found.append((match.start(), match.end(), str(label)))
+
+    found.sort(key=lambda x: x[0])
+    return found
+
+
+def _choose_ner_label(candidates, desired):
+    for candidate in candidates:
+        if candidate.lower() == desired.lower():
+            return candidate
+    return candidates[0] if candidates else desired
+
+
+def _text_ner(task, parsed, state):
+    labels_cfg = parsed["labels"] or {
+        "name": "ner_label",
+        "to_name": parsed["text_name"],
+        "labels": ["ORG", "PERSON", "LOC"],
+    }
+
+    text = str(task.get("data", {}).get("text", ""))
+    spans = _find_spans(text, state)
+    supported = labels_cfg.get("labels") or ["ORG", "PERSON", "LOC"]
+
+    results = []
+    for idx, (start, end, desired_label) in enumerate(spans, start=1):
+        label = _choose_ner_label(supported, desired_label)
+        results.append(
+            {
+                "id": f"{task.get('id', 'task')}_ner_{idx}",
+                "from_name": labels_cfg["name"],
+                "to_name": labels_cfg["to_name"],
+                "type": "labels",
+                "value": {
+                    "start": start,
+                    "end": end,
+                    "text": text[start:end],
+                    "labels": [label],
+                },
+            }
+        )
+
+    if not results and text:
+        first_word = text.split()[0]
+        end = len(first_word)
+        fallback_label = supported[0] if supported else "ORG"
+        results.append(
+            {
+                "id": f"{task.get('id', 'task')}_ner_fallback",
+                "from_name": labels_cfg["name"],
+                "to_name": labels_cfg["to_name"],
+                "type": "labels",
+                "value": {
+                    "start": 0,
+                    "end": end,
+                    "text": text[:end],
+                    "labels": [fallback_label],
+                },
+            }
+        )
+
+    return {
+        "model_version": state["model_version"],
+        "score": _score(0.79, state),
+        "result": results,
+    }
+
+
+def _predict(payload):
+    tasks = payload.get("tasks") or []
+    project = payload.get("project")
+    project_label_config = project.get("label_config") if isinstance(project, dict) else None
+    label_config = payload.get("label_config") or project_label_config
+
+    parsed = _parse_label_config(label_config or "")
+    mode = _infer_mode(parsed, tasks)
+    state = _load_model_state()
+
+    predictions = []
+    for task in tasks:
+        if mode == "image_detection":
+            predictions.append(_image_detection(task, parsed, state))
+        elif mode == "text_ner":
+            predictions.append(_text_ner(task, parsed, state))
+        elif mode == "image_classification":
+            predictions.append(_image_classification(task, parsed, state))
+        elif mode == "text_classification":
+            predictions.append(_text_classification(task, parsed, state))
+        else:
+            predictions.append({"model_version": state["model_version"], "score": 0.1, "result": []})
+
+    if mode in ("text_classification", "image_classification") and predictions:
+        top_version = predictions[0].get("model_version", state["model_version"])
+    else:
+        top_version = state["model_version"]
+
+    return {
+        "model_version": top_version,
+        "training_run": int(state.get("training_run", 0)),
+        "mode": mode,
+        "results": predictions,
+    }
+
+
+def _post_json(url, payload):
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=TRAINER_TIMEOUT_SECONDS) as response:
+        raw = response.read().decode("utf-8") if response.length != 0 else ""
+        if not raw:
+            return {"status_code": response.status}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = {"raw": raw}
+        parsed["status_code"] = response.status
+        return parsed
+
+
+def _trigger_trainer(payload, webhook=False):
+    url = TRAINER_WEBHOOK_URL if webhook else TRAINER_URL
+    wrapped = {
+        "triggered_at": _utc_now_iso(),
+        "source": "ml-backend",
+        "payload": payload,
+    }
+
+    if isinstance(payload, dict):
+        wrapped.update(payload)
+
+    try:
+        return {
+            "accepted": True,
+            "trainer_url": url,
+            "trainer_response": _post_json(url, wrapped),
+        }
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return {
+            "accepted": False,
+            "trainer_url": url,
+            "status_code": exc.code,
+            "error": body,
+        }
+    except urllib.error.URLError as exc:
+        return {
+            "accepted": False,
+            "trainer_url": url,
+            "error": str(exc),
+        }
+
+
+class BackendHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        route = self.path.rstrip("/") or "/"
+        if route in ("/", "/health"):
+            state = _load_model_state()
+            text_bundle = _load_text_classifier_bundle()
+            image_bundle = _load_image_classifier_bundle()
+            text_metadata = text_bundle["metadata"] if text_bundle else _load_json(_TEXT_METADATA_PATH)
+            image_metadata = image_bundle["metadata"] if image_bundle else _load_json(_IMAGE_METADATA_PATH)
+            _send_json(
+                self,
+                200,
+                {
+                    "status": "UP",
+                    "service": SERVICE_NAME,
+                    "phase": "phase-4-text-and-image-classifiers",
+                    "model_version": state.get("model_version", "demo-rule-v1"),
+                    "training_run": int(state.get("training_run", 0)),
+                    "model_state_path": MODEL_STATE_PATH,
+                    "text_classifier": {
+                        "active": bool(text_metadata),
+                        "metadata": text_metadata,
+                        "metadata_path": _TEXT_METADATA_PATH,
+                        "uncertainty": {
+                            "confidence_threshold": TEXT_CLS_UNCERTAIN_THRESHOLD,
+                            "margin_threshold": TEXT_CLS_UNCERTAIN_MARGIN,
+                        },
+                    },
+                    "image_classifier": {
+                        "active": bool(image_metadata),
+                        "metadata": image_metadata,
+                        "metadata_path": _IMAGE_METADATA_PATH,
+                        "uncertainty": {
+                            "confidence_threshold": IMAGE_CLS_UNCERTAIN_THRESHOLD,
+                        },
+                    },
+                },
+            )
+            return
+
+        if route == "/model-state":
+            _send_json(self, 200, _load_model_state())
+            return
+
+        if route in ("/models/text-classification", "/models/text-classification/current"):
+            metadata = _load_json(_TEXT_METADATA_PATH)
+            if not isinstance(metadata, dict):
+                _send_json(self, 404, {"detail": "no trained text classification model"})
+                return
+            _send_json(self, 200, metadata)
+            return
+
+        if route in ("/models/image-classification", "/models/image-classification/current"):
+            metadata = _load_json(_IMAGE_METADATA_PATH)
+            if not isinstance(metadata, dict):
+                _send_json(self, 404, {"detail": "no trained image classification model"})
+                return
+            _send_json(self, 200, metadata)
+            return
+
+        _send_json(self, 404, {"detail": "not found"})
+
+    def do_POST(self):
+        route = self.path.rstrip("/") or "/"
+        payload = _read_json_body(self)
+
+        if route == "/predict":
+            _send_json(self, 200, _predict(payload))
+            return
+
+        if route == "/setup":
+            state = _load_model_state()
+            _send_json(
+                self,
+                200,
+                {
+                    "model_version": state.get("model_version"),
+                    "service": SERVICE_NAME,
+                    "ready": True,
+                },
+            )
+            return
+
+        if route == "/train":
+            result = _trigger_trainer(payload, webhook=False)
+            status_code = 202 if result.get("accepted") else 502
+            _send_json(self, status_code, result)
+            return
+
+        if route in ("/webhook", "/webhook/label-studio"):
+            result = _trigger_trainer(payload, webhook=True)
+            status_code = 202 if result.get("accepted") else 502
+            _send_json(self, status_code, result)
+            return
+
+        _send_json(self, 404, {"detail": "not found"})
+
+    def log_message(self, fmt, *args):
+        return
+
+
+if __name__ == "__main__":
+    HTTPServer(("0.0.0.0", PORT), BackendHandler).serve_forever()

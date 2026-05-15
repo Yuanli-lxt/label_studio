@@ -1,0 +1,7 @@
+<View>
+  <Text name="text" value="$text"/>
+  <Choices name="text_label" toName="text" choice="single" showInLine="true">
+    <Choice value="Positive"/>
+    <Choice value="Negative"/>
+  </Choices>
+</View>
