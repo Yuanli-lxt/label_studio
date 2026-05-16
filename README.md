@@ -198,6 +198,23 @@ Export review tasks (misclassified or low-confidence eval cases) for Label Studi
 scripts/export_image_review_tasks_from_metadata.sh
 ```
 
+Bootstrap/import a reproducible Label Studio human-review project:
+
+```bash
+export LABEL_STUDIO_URL=http://localhost:18080
+export LABEL_STUDIO_API_TOKEN='<your-token>'
+scripts/bootstrap_label_studio_image_review.py
+scripts/import_image_review_tasks_to_label_studio.py
+```
+
+Or run the automated portion of the flow check:
+
+```bash
+scripts/run_label_studio_human_review_flow_check.sh
+```
+
+Detailed guide: `docs/label_studio_human_review_flow.md`.
+
 Webhook candidate ingest uses Label Studio API task fetch in trainer:
 - `LABEL_STUDIO_URL` (default `http://label-studio:8080`)
 - `LABEL_STUDIO_API_TOKEN` (required for API fetch on webhook flow)
