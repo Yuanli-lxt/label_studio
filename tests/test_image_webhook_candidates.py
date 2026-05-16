@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import json
 import os
 import shutil
@@ -93,6 +94,14 @@ def load_trainer_module(env_overrides):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = previous
+
+
+def fake_jwt(token_type):
+    def enc(obj):
+        raw = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{enc({'alg': 'none'})}.{enc({'token_type': token_type})}.signature"
 
 
 class ImageWebhookCandidatesTests(unittest.TestCase):
@@ -191,6 +200,70 @@ class ImageWebhookCandidatesTests(unittest.TestCase):
             self.assertEqual(1, len(rows))
             self.assertEqual(901, rows[0]["task_id"])
             self.assertEqual(77, rows[0]["project_id"])
+
+    def test_jwt_refresh_token_is_exchanged_for_label_studio_task_fetch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            image_root = self._prepare_image_root(tmp_dir)
+            module = self._module(tmp_dir, image_root)
+            module.LABEL_STUDIO_API_TOKEN = fake_jwt("refresh")
+
+            full_task = {
+                "id": 901,
+                "project": 77,
+                "data": {"image": "/data/local-files/?d=images/demo_product_red.png"},
+                "annotations": [
+                    {
+                        "id": 9801,
+                        "was_cancelled": False,
+                        "updated_at": "2026-05-12T09:00:00.000000Z",
+                        "result": [
+                            {
+                                "from_name": "image_label",
+                                "to_name": "image",
+                                "type": "choices",
+                                "value": {"choices": ["Product"]},
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            class Resp:
+                def __init__(self, payload):
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def read(self):
+                    return json.dumps(self.payload).encode("utf-8")
+
+            captured = {"refresh_calls": 0, "task_auth": None}
+
+            def fake_urlopen(req, timeout=None):
+                if req.full_url.endswith("/api/token/refresh/"):
+                    captured["refresh_calls"] += 1
+                    return Resp({"access": fake_jwt("access")})
+                captured["task_auth"] = req.get_header("Authorization")
+                return Resp(full_task)
+
+            original = module.urllib.request.urlopen
+            module.urllib.request.urlopen = fake_urlopen
+            try:
+                sample, warning = module._maybe_record_image_candidate_from_webhook(
+                    {"task": {"id": 901}, "project": {"id": 77}}
+                )
+            finally:
+                module.urllib.request.urlopen = original
+
+            self.assertIsNone(warning)
+            self.assertEqual("Product", sample["label"])
+            self.assertEqual(1, captured["refresh_calls"])
+            self.assertTrue(captured["task_auth"].startswith("Bearer "))
 
     def test_parse_image_classification_annotation(self):
         with tempfile.TemporaryDirectory() as tmp:

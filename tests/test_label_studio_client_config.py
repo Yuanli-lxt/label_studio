@@ -1,4 +1,6 @@
 import os
+import base64
+import json
 import unittest
 from contextlib import contextmanager
 
@@ -63,6 +65,24 @@ class FakeSession:
         raise AssertionError(f"unexpected request: {method} {url}")
 
 
+def fake_jwt(token_type):
+    def enc(obj):
+        raw = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{enc({'alg': 'none'})}.{enc({'token_type': token_type})}.signature"
+
+
+class FakeJWTSession:
+    def __init__(self):
+        self.headers = {}
+        self.refresh_calls = 0
+
+    def post(self, url, json=None, timeout=None, headers=None):
+        self.refresh_calls += 1
+        return FakeResponse({"access": fake_jwt("access")})
+
+
 class LabelStudioClientConfigTests(unittest.TestCase):
     def test_from_env_defaults_and_missing_token(self):
         with patched_env({"LABEL_STUDIO_API_TOKEN": None, "LABEL_STUDIO_URL": None, "LABEL_STUDIO_TIMEOUT_SECONDS": None}):
@@ -118,6 +138,19 @@ class LabelStudioClientConfigTests(unittest.TestCase):
         self.assertIn("ANNOTATION_CREATED", payload["actions"])
         self.assertIn("ANNOTATION_UPDATED", payload["actions"])
         self.assertTrue(payload["send_payload"])
+
+    def test_jwt_refresh_token_is_exchanged_for_bearer_access_token(self):
+        settings = LabelStudioSettings.from_env(require_token=False).__class__(
+            **{
+                **LabelStudioSettings.from_env(require_token=False).__dict__,
+                "api_token": fake_jwt("refresh"),
+            }
+        )
+        session = FakeJWTSession()
+        client = LabelStudioClient(settings, session=session)
+
+        self.assertEqual(1, session.refresh_calls)
+        self.assertTrue(client.session.headers["Authorization"].startswith("Bearer "))
 
 
 if __name__ == "__main__":

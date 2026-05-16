@@ -11,3 +11,6 @@ Local URLs:
 - MinIO Console: `http://localhost:9001`
 - ML backend health: `http://localhost:9090/health`
 - Trainer health: `http://localhost:9091/health`
+
+
+目的:它比较适合这些场景：做训练数据集；给大模型/RAG/Agent 做人工评测

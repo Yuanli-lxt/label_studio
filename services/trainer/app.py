@@ -1,6 +1,8 @@
 import json
 import os
 import threading
+import base64
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -59,6 +61,7 @@ IMAGE_TRAINING_CANDIDATES_PATH = os.getenv(
 LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "http://label-studio:8080")
 LABEL_STUDIO_API_TOKEN = os.getenv("LABEL_STUDIO_API_TOKEN", "")
 LABEL_STUDIO_TIMEOUT_SECONDS = float(os.getenv("LABEL_STUDIO_TIMEOUT_SECONDS", "5.0"))
+_LABEL_STUDIO_ACCESS_TOKEN_CACHE = {}
 
 _TEXT_CLASSIFIER_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "classifier.joblib")
 _TEXT_VECTORIZER_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "vectorizer.joblib")
@@ -423,6 +426,78 @@ def _label_studio_task_endpoint(task_id, project_id=None):
     return endpoint
 
 
+def _jwt_payload(token):
+    parts = str(token or "").strip().split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((payload + padding).encode("ascii"))
+        return json.loads(decoded.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _jwt_token_type(token):
+    data = _jwt_payload(token)
+    token_type = data.get("token_type") if isinstance(data, dict) else None
+    return token_type if token_type in {"access", "refresh"} else None
+
+
+def _refresh_label_studio_jwt_access_token(refresh_token):
+    cache_key = (LABEL_STUDIO_URL.rstrip("/"), refresh_token)
+    cached = _LABEL_STUDIO_ACCESS_TOKEN_CACHE.get(cache_key)
+    if cached:
+        access_token, expires_at = cached
+        if expires_at and time.time() < (expires_at - 60):
+            return access_token
+
+    endpoint = f"{LABEL_STUDIO_URL.rstrip('/')}/api/token/refresh/"
+    payload = json.dumps({"refresh": refresh_token}).encode("utf-8")
+    req = urllib.request.Request(endpoint, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=LABEL_STUDIO_TIMEOUT_SECONDS) as resp:
+            body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8")
+        except Exception:
+            error_body = ""
+        raise ValueError(
+            f"Label Studio JWT refresh failed: HTTP {exc.code}, endpoint={endpoint}, body={error_body}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"Label Studio JWT refresh failed: {exc.reason}, endpoint={endpoint}") from exc
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Label Studio JWT refresh returned invalid JSON, endpoint={endpoint}") from exc
+    access_token = data.get("access") if isinstance(data, dict) else None
+    if not isinstance(access_token, str) or not access_token.strip():
+        raise ValueError(f"Label Studio JWT refresh response missing access token, endpoint={endpoint}")
+    access_token = access_token.strip()
+    access_payload = _jwt_payload(access_token)
+    expires_at = access_payload.get("exp") if isinstance(access_payload, dict) else None
+    if isinstance(expires_at, (int, float)):
+        _LABEL_STUDIO_ACCESS_TOKEN_CACHE[cache_key] = (access_token, float(expires_at))
+    return access_token
+
+
+def _label_studio_auth_header_value(token):
+    token = str(token or "").strip()
+    token_type = _jwt_token_type(token)
+    if token_type == "access":
+        return f"Bearer {token}"
+    if token_type == "refresh":
+        return f"Bearer {_refresh_label_studio_jwt_access_token(token)}"
+    return f"Token {token}"
+
+
 def _fetch_label_studio_task(task_id, project_id=None):
     if task_id is None:
         raise ValueError("missing task_id for Label Studio task fetch")
@@ -433,7 +508,7 @@ def _fetch_label_studio_task(task_id, project_id=None):
 
     endpoint = _label_studio_task_endpoint(task_id, project_id)
     req = urllib.request.Request(endpoint, method="GET")
-    req.add_header("Authorization", f"Token {LABEL_STUDIO_API_TOKEN}")
+    req.add_header("Authorization", _label_studio_auth_header_value(LABEL_STUDIO_API_TOKEN))
     req.add_header("Accept", "application/json")
 
     try:

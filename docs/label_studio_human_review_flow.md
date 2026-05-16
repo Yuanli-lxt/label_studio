@@ -20,6 +20,7 @@ This is intentionally scoped to image classification review. Image detection and
 - Stack started from this repository.
 - Label Studio account created at `http://localhost:18080`.
 - Label Studio API token generated from the UI.
+- Label Studio 1.23+ may issue JWT-style API tokens. The helper scripts and trainer support these by refreshing the JWT token automatically before API calls.
 
 ## Environment Variables
 
@@ -32,7 +33,7 @@ export LABEL_STUDIO_TIMEOUT_SECONDS=10
 export LABEL_STUDIO_IMAGE_REVIEW_PROJECT_TITLE='Image Classification Human Review'
 export LABEL_STUDIO_IMAGE_REVIEW_PROJECT_DESCRIPTION='Human review project for image classification model mistakes and low-confidence cases.'
 export LABEL_STUDIO_ML_BACKEND_URL=http://ml-backend:9090
-export LABEL_STUDIO_TRAINER_WEBHOOK_URL=http://trainer:9091/webhook/label-studio
+export LABEL_STUDIO_TRAINER_WEBHOOK_URL=http://host.docker.internal:9091/webhook/label-studio
 export IMAGE_REVIEW_TASKS_PATH=demo_data/tasks/image_classification_review_tasks.json
 export IMAGE_TRAINING_CANDIDATES_PATH=demo_data/tasks/image_classification_training_candidates.jsonl
 export IMAGE_EVAL_MANIFEST_PATH=demo_data/tasks/image_classification_eval_manifest.json
@@ -46,7 +47,7 @@ export LABEL_STUDIO_SKIP_ML_BACKEND_SETUP=1
 export LABEL_STUDIO_SKIP_WEBHOOK_SETUP=1
 ```
 
-Do not put a real token in committed files.
+Do not put a real token in committed files. For Label Studio 1.23+, use the UI-provided token as-is; if it is a JWT refresh token, the scripts will exchange it for a short-lived access token internally.
 
 ## Start Services
 
@@ -76,7 +77,7 @@ The script will:
 - Create or reuse `Image Classification Human Review`.
 - Apply `label_configs/image_classification.xml`.
 - Try to connect ML backend `http://ml-backend:9090`.
-- Try to configure webhook `http://trainer:9091/webhook/label-studio`.
+- Try to configure webhook `http://host.docker.internal:9091/webhook/label-studio`.
 - Print a project URL like `http://localhost:18080/projects/<project_id>/data`.
 
 If ML backend or webhook API endpoints differ in your Label Studio version, the project still remains usable and the script prints manual setup instructions.
@@ -139,7 +140,7 @@ Expected behavior after saving:
 
 - Label Studio sends annotation created/updated webhook to trainer.
 - Trainer does not trust the webhook payload alone.
-- Trainer calls Label Studio task API with `LABEL_STUDIO_API_TOKEN`.
+- Trainer calls Label Studio task API with `LABEL_STUDIO_API_TOKEN`; both legacy tokens and Label Studio 1.23 JWT tokens are supported.
 - Trainer parses the full task annotation result.
 - Trainer appends a JSONL candidate row.
 
@@ -204,6 +205,36 @@ IMAGE_GATE_MODE=container scripts/run_image_classifier_validation_gate.sh
 
 The gate retrains, inspects metadata, runs regression probes, checks persisted artifacts, and verifies fixed eval filenames do not leak into train files.
 
+## Verified Local Smoke Test
+
+Last verified on 2026-05-16 with Label Studio `1.23.0` on Docker Desktop + WSL2:
+
+- Project `Image Classification Human Review` was created/reused as `project_id=1`.
+- ML backend `http://ml-backend:9090` connected successfully.
+- Webhook `http://host.docker.internal:9091/webhook/label-studio` was created/updated successfully.
+- Three image review tasks were imported, and a second import dry run skipped all three as duplicates.
+- A Label Studio UI annotation update produced one JSONL training candidate:
+
+```json
+{
+  "task_id": 1,
+  "project_id": 1,
+  "image": "/data/local-files/?d=images/demo_other_lowlight.png",
+  "label": "Product",
+  "source": "label_studio_webhook_task_fetch"
+}
+```
+
+The verified candidate belongs to the fixed eval manifest. This is useful as a safety smoke test: the image gate reads the candidate, then reports `candidate_eval_leakage_skipped: 1` and `candidates used after eval filter: 0`, proving the candidate was not allowed into the training split.
+
+Validation commands that passed in this state:
+
+```bash
+python3 -m unittest discover -s tests -v
+scripts/run_image_classifier_validation_gate.sh
+scripts/run_text_classifier_validation_gate.sh
+```
+
 ## Troubleshooting
 
 API token missing:
@@ -229,8 +260,9 @@ Project duplicated:
 Webhook not triggered:
 
 - Confirm webhook URL is reachable from the Label Studio container, not from the host.
-- In this compose setup, use `http://trainer:9091/webhook/label-studio`.
-- If manually configuring from a host-based Label Studio, use `http://host.docker.internal:9091/webhook/label-studio` or `http://localhost:9091/webhook/label-studio` depending on where Label Studio runs.
+- In this Docker Desktop + WSL2 setup, prefer `http://host.docker.internal:9091/webhook/label-studio`; Label Studio validates this URL and the container can reach the host-published trainer port.
+- The Docker service URL `http://trainer:9091/webhook/label-studio` is reachable inside the compose network, but Label Studio 1.23 rejects the single-label hostname in webhook URL validation.
+- If Label Studio runs directly on the host instead of in compose, `http://localhost:9091/webhook/label-studio` can also work.
 
 ML backend connection failed:
 
@@ -260,6 +292,7 @@ Docker networking gotcha:
 - Host scripts talk to Label Studio via `http://localhost:18080`.
 - Label Studio container talks to ML backend and trainer via service names: `http://ml-backend:9090` and `http://trainer:9091`.
 - `localhost` inside a container is that container itself, not your WSL host.
+- For webhook configuration, Label Studio 1.23 validates the URL and rejects single-label hostnames such as `trainer`; use `http://host.docker.internal:9091/webhook/label-studio` on Docker Desktop + WSL2.
 
 ## Demo Talk Track
 

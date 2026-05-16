@@ -140,7 +140,7 @@ PY
 1. Open the project URL printed above, or ${LABEL_STUDIO_URL}/projects.
 2. Open the "Image Classification Human Review" project.
 3. Review imported images, correct/confirm Product vs Other, then Submit/Update annotations.
-4. Label Studio webhook should call trainer: ${LABEL_STUDIO_TRAINER_WEBHOOK_URL:-http://trainer:9091/webhook/label-studio}
+4. Label Studio webhook should call trainer: ${LABEL_STUDIO_TRAINER_WEBHOOK_URL:-http://host.docker.internal:9091/webhook/label-studio}
 5. Trainer should fetch the full task through Label Studio API and append candidates to ${IMAGE_TRAINING_CANDIDATES_PATH:-demo_data/tasks/image_classification_training_candidates.jsonl}.
 
 [INFO] Follow-up verification commands:

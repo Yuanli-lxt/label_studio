@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import base64
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -17,7 +19,7 @@ DEFAULT_PROJECT_DESCRIPTION = (
     "Human review project for image classification model mistakes and low-confidence cases."
 )
 DEFAULT_ML_BACKEND_URL = "http://ml-backend:9090"
-DEFAULT_TRAINER_WEBHOOK_URL = "http://trainer:9091/webhook/label-studio"
+DEFAULT_TRAINER_WEBHOOK_URL = "http://host.docker.internal:9091/webhook/label-studio"
 DEFAULT_IMAGE_REVIEW_TASKS_PATH = "demo_data/tasks/image_classification_review_tasks.json"
 DEFAULT_IMAGE_TRAINING_CANDIDATES_PATH = "demo_data/tasks/image_classification_training_candidates.jsonl"
 DEFAULT_IMAGE_EVAL_MANIFEST_PATH = "demo_data/tasks/image_classification_eval_manifest.json"
@@ -132,6 +134,25 @@ def _env_flag(name: str) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _jwt_payload(token: str) -> Optional[Dict[str, Any]]:
+    parts = token.strip().split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((payload + padding).encode("ascii"))
+        return json.loads(decoded.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _jwt_token_type(token: str) -> Optional[str]:
+    data = _jwt_payload(token)
+    token_type = data.get("token_type") if isinstance(data, dict) else None
+    return token_type if token_type in {"access", "refresh"} else None
+
+
 def project_data_url(base_url: str, project_id: int) -> str:
     return f"{base_url.rstrip('/')}/projects/{int(project_id)}/data"
 
@@ -206,12 +227,39 @@ class LabelStudioClient:
         self.settings = settings
         self.base_url = settings.url.rstrip("/")
         self.session = session or requests.Session()
-        self.session.headers.update(
-            {
-                "Authorization": f"Token {settings.api_token}",
-                "Accept": "application/json",
-            }
-        )
+        self.session.headers.update({"Accept": "application/json"})
+        self.session.headers.update({"Authorization": self._auth_header_value(settings.api_token)})
+
+    def _auth_header_value(self, token: str) -> str:
+        token = token.strip()
+        token_type = _jwt_token_type(token)
+        if token_type == "access":
+            return f"Bearer {token}"
+        if token_type == "refresh":
+            return f"Bearer {self._refresh_jwt_access_token(token)}"
+        return f"Token {token}"
+
+    def _refresh_jwt_access_token(self, refresh_token: str) -> str:
+        url = f"{self.base_url}/api/token/refresh/"
+        try:
+            response = self.session.post(
+                url,
+                json={"refresh": refresh_token},
+                timeout=self.settings.timeout_seconds,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Label Studio API POST {url} failed while refreshing JWT token: {exc}") from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            raise LabelStudioAPIError("POST", url, response.status_code, response.text)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"Label Studio API POST {url} returned invalid JSON while refreshing JWT token") from exc
+        access_token = payload.get("access") if isinstance(payload, dict) else None
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise RuntimeError(f"Label Studio API POST {url} did not return an access token")
+        return access_token.strip()
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
         url = path if path.startswith("http://") or path.startswith("https://") else f"{self.base_url}{path}"
