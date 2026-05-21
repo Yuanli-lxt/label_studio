@@ -31,6 +31,10 @@ TEXT_MODEL_ARTIFACTS_DIR = os.getenv(
     os.getenv("MODEL_ARTIFACTS_DIR", "/model-state/text_classifier"),
 )
 IMAGE_MODEL_ARTIFACTS_DIR = os.getenv("IMAGE_MODEL_ARTIFACTS_DIR", "/model-state/image_classifier")
+IMAGE_SEG_MODEL_ARTIFACTS_DIR = os.getenv(
+    "IMAGE_SEG_MODEL_ARTIFACTS_DIR",
+    "/model-state/image_segmentation",
+)
 TRAINING_DATASET_EVENTS_PATH = os.getenv(
     "TRAINING_DATASET_EVENTS_PATH",
     "/model-state/text_classifier/training_dataset_events.jsonl",
@@ -58,6 +62,10 @@ IMAGE_TRAINING_CANDIDATES_PATH = os.getenv(
     "IMAGE_TRAINING_CANDIDATES_PATH",
     "/demo-tasks/image_classification_training_candidates.jsonl",
 )
+IMAGE_SEG_TRAINING_CANDIDATES_PATH = os.getenv(
+    "IMAGE_SEG_TRAINING_CANDIDATES_PATH",
+    "/demo-tasks/image_segmentation_training_candidates.jsonl",
+)
 LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "http://label-studio:8080")
 LABEL_STUDIO_API_TOKEN = os.getenv("LABEL_STUDIO_API_TOKEN", "")
 LABEL_STUDIO_TIMEOUT_SECONDS = float(os.getenv("LABEL_STUDIO_TIMEOUT_SECONDS", "5.0"))
@@ -71,6 +79,12 @@ _TEXT_LAST_DATASET_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "last_training_
 _IMAGE_CLASSIFIER_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "classifier.joblib")
 _IMAGE_METADATA_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "metadata.json")
 _IMAGE_LAST_DATASET_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "last_training_dataset.jsonl")
+_IMAGE_SEG_ARTIFACT_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "segmenter.joblib")
+_IMAGE_SEG_METADATA_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "metadata.json")
+_IMAGE_SEG_LAST_DATASET_PATH = os.path.join(
+    IMAGE_SEG_MODEL_ARTIFACTS_DIR,
+    "last_training_dataset.jsonl",
+)
 
 # Backward-compatible aliases retained for existing tests/scripts.
 MODEL_ARTIFACTS_DIR = TEXT_MODEL_ARTIFACTS_DIR
@@ -103,6 +117,13 @@ def _default_state():
             "model_version": None,
             "trained_at": None,
             "metadata_path": _IMAGE_METADATA_PATH,
+        },
+        "image_segmentation": {
+            "active": False,
+            "model_version": None,
+            "trained_at": None,
+            "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
+            "metadata_path": _IMAGE_SEG_METADATA_PATH,
         },
         "behavior": {
             "image_positive_tokens": ["blue", "product", "object", "demo_blue"],
@@ -174,6 +195,8 @@ def _load_state():
         state["text_classifier"].update(loaded["text_classifier"])
     if isinstance(loaded.get("image_classifier"), dict):
         state["image_classifier"].update(loaded["image_classifier"])
+    if isinstance(loaded.get("image_segmentation"), dict):
+        state["image_segmentation"].update(loaded["image_segmentation"])
     return state
 
 
@@ -556,6 +579,67 @@ def _normalize_image_classification_label(value):
     return None
 
 
+def _normalize_image_segmentation_label(value):
+    label = _normalize_label(value)
+    if not label:
+        return None
+    if label.lower() == "object":
+        return "Object"
+    return None
+
+
+def _positive_int(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _extract_brush_mask_result(result_items):
+    if not isinstance(result_items, list):
+        return None
+    for item in result_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "brushlabels":
+            continue
+        value = item.get("value")
+        if not isinstance(value, dict):
+            continue
+        if str(value.get("format") or "").strip().lower() != "rle":
+            continue
+
+        rle = value.get("rle")
+        if not isinstance(rle, list) or not rle:
+            continue
+
+        labels = value.get("brushlabels")
+        if not isinstance(labels, list):
+            continue
+
+        label = None
+        for raw_label in labels:
+            label = _normalize_image_segmentation_label(raw_label)
+            if label:
+                break
+        if label is None:
+            continue
+
+        original_width = _positive_int(item.get("original_width"))
+        original_height = _positive_int(item.get("original_height"))
+        if original_width is None or original_height is None:
+            continue
+
+        return {
+            "label": label,
+            "rle": rle,
+            "original_width": original_width,
+            "original_height": original_height,
+        }
+    return None
+
+
 def _parse_image_classification_sample_from_full_task(task, fallback_project_id=None):
     if not isinstance(task, dict):
         raise ValueError("Label Studio task payload is not an object")
@@ -614,6 +698,66 @@ def _parse_image_classification_sample_from_full_task(task, fallback_project_id=
     }
 
 
+def _parse_image_segmentation_sample_from_full_task(task, fallback_project_id=None):
+    if not isinstance(task, dict):
+        raise ValueError("Label Studio task payload is not an object")
+
+    task_id = task.get("id")
+    try:
+        task_id = int(task_id)
+    except (TypeError, ValueError):
+        raise ValueError("Label Studio task payload missing valid task id")
+
+    project_id = _normalize_project_id(task.get("project"))
+    if project_id is None:
+        project_id = _normalize_project_id(fallback_project_id)
+
+    data = task.get("data")
+    data = data if isinstance(data, dict) else {}
+    image = data.get("image")
+    if image is None:
+        raise ValueError(f"Label Studio task {task_id} has no `data.image` field")
+
+    annotations = task.get("annotations")
+    if not isinstance(annotations, list) or not annotations:
+        raise ValueError(f"Label Studio task {task_id} has no annotations")
+
+    selected = None
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        if annotation.get("was_cancelled"):
+            continue
+        mask = _extract_brush_mask_result(annotation.get("result", []))
+        if mask is None:
+            continue
+        updated_at = _normalize_text(annotation.get("updated_at") or annotation.get("created_at"))
+        selected = {
+            "annotation_id": annotation.get("id"),
+            "updated_at": updated_at,
+            **mask,
+        }
+
+    if selected is None:
+        raise ValueError(
+            f"Label Studio task {task_id} has no non-cancelled image segmentation annotation "
+            "with Object BrushLabels RLE mask"
+        )
+
+    return {
+        "task_id": task_id,
+        "project_id": project_id,
+        "image": image,
+        "label": selected["label"],
+        "rle": selected["rle"],
+        "original_width": selected["original_width"],
+        "original_height": selected["original_height"],
+        "source": "label_studio_webhook_task_fetch",
+        "annotation_id": selected["annotation_id"],
+        "updated_at": selected["updated_at"] or _utc_now_iso(),
+    }
+
+
 def _append_image_training_candidate(candidate):
     required_fields = ["task_id", "project_id", "image", "label", "source", "annotation_id", "updated_at"]
     for field in required_fields:
@@ -622,6 +766,28 @@ def _append_image_training_candidate(candidate):
 
     _ensure_parent(IMAGE_TRAINING_CANDIDATES_PATH)
     with open(IMAGE_TRAINING_CANDIDATES_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(candidate, ensure_ascii=False) + "\n")
+
+
+def _append_image_segmentation_training_candidate(candidate):
+    required_fields = [
+        "task_id",
+        "project_id",
+        "image",
+        "label",
+        "rle",
+        "original_width",
+        "original_height",
+        "source",
+        "annotation_id",
+        "updated_at",
+    ]
+    for field in required_fields:
+        if candidate.get(field) is None:
+            raise ValueError(f"image segmentation training candidate missing required field: {field}")
+
+    _ensure_parent(IMAGE_SEG_TRAINING_CANDIDATES_PATH)
+    with open(IMAGE_SEG_TRAINING_CANDIDATES_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(candidate, ensure_ascii=False) + "\n")
 
 
@@ -688,6 +854,81 @@ def _read_image_training_candidate_samples():
     return samples, {"total": total, "used": used, "skipped": skipped, "errors": errors}
 
 
+def _read_image_segmentation_training_candidate_samples():
+    if not os.path.exists(IMAGE_SEG_TRAINING_CANDIDATES_PATH):
+        return [], {"total": 0, "used": 0, "skipped": 0, "errors": []}
+
+    samples = []
+    errors = []
+    total = 0
+    used = 0
+    skipped = 0
+    try:
+        with open(IMAGE_SEG_TRAINING_CANDIDATES_PATH, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                content = line.strip()
+                if not content:
+                    continue
+                total += 1
+                try:
+                    row = json.loads(content)
+                except json.JSONDecodeError:
+                    errors.append(f"line {line_no}: invalid JSON")
+                    skipped += 1
+                    continue
+                if not isinstance(row, dict):
+                    errors.append(f"line {line_no}: candidate row is not an object")
+                    skipped += 1
+                    continue
+
+                image_ref = row.get("image")
+                image_path = _resolve_image_file_path(image_ref)
+                if not image_path:
+                    errors.append(f"line {line_no}: cannot resolve image path for {image_ref}")
+                    skipped += 1
+                    continue
+
+                label = _normalize_image_segmentation_label(row.get("label"))
+                if label is None:
+                    errors.append(f"line {line_no}: unsupported label {row.get('label')}, expected Object")
+                    skipped += 1
+                    continue
+
+                rle = row.get("rle")
+                if not isinstance(rle, list) or not rle:
+                    errors.append(f"line {line_no}: missing non-empty RLE mask")
+                    skipped += 1
+                    continue
+
+                original_width = _positive_int(row.get("original_width"))
+                original_height = _positive_int(row.get("original_height"))
+                if original_width is None or original_height is None:
+                    errors.append(f"line {line_no}: missing positive original dimensions")
+                    skipped += 1
+                    continue
+
+                sample = {
+                    "image": image_ref,
+                    "image_path": image_path,
+                    "label": label,
+                    "rle": rle,
+                    "original_width": original_width,
+                    "original_height": original_height,
+                    "dataset_split": "train",
+                    "task_id": row.get("task_id"),
+                    "annotation_id": row.get("annotation_id"),
+                    "project_id": row.get("project_id"),
+                    "updated_at": row.get("updated_at"),
+                    "source": row.get("source") or "training_candidate",
+                }
+                samples.append(sample)
+                used += 1
+    except OSError as exc:
+        errors.append(f"failed to read candidates file: {exc}")
+
+    return samples, {"total": total, "used": used, "skipped": skipped, "errors": errors}
+
+
 def _maybe_record_image_candidate_from_webhook(payload):
     task_id = _extract_webhook_task_id(payload)
     project_id = _extract_webhook_project_id(payload)
@@ -697,6 +938,18 @@ def _maybe_record_image_candidate_from_webhook(payload):
     full_task = _fetch_label_studio_task(task_id, project_id)
     candidate = _parse_image_classification_sample_from_full_task(full_task, project_id)
     _append_image_training_candidate(candidate)
+    return candidate, None
+
+
+def _maybe_record_image_segmentation_candidate_from_webhook(payload):
+    task_id = _extract_webhook_task_id(payload)
+    project_id = _extract_webhook_project_id(payload)
+    if task_id is None:
+        return None, "image segmentation webhook candidate ingest skipped: task_id not found in payload"
+
+    full_task = _fetch_label_studio_task(task_id, project_id)
+    candidate = _parse_image_segmentation_sample_from_full_task(full_task, project_id)
+    _append_image_segmentation_training_candidate(candidate)
     return candidate, None
 
 
