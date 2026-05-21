@@ -1382,8 +1382,11 @@ def _normalize_manual_image_segmentation_samples(samples):
         if not isinstance(sample, dict):
             continue
 
-        image_ref = sample.get("image") if sample.get("image") is not None else sample.get("image_path")
+        image_ref = sample.get("image")
         image_path = _resolve_image_file_path(image_ref)
+        if not image_path and sample.get("image_path") is not None:
+            image_ref = sample.get("image_path")
+            image_path = _resolve_image_file_path(image_ref)
         label = _normalize_image_segmentation_label(sample.get("label"))
         rle = sample.get("rle")
         original_width = _positive_int(sample.get("original_width"))
@@ -1688,6 +1691,24 @@ def _image_segmentation_dataset_quality_report(samples):
     unsupported = sorted(label for label in distribution if label != "Object")
     if unsupported:
         errors.append(f"unsupported segmentation labels: {unsupported}; expected Object")
+    invalid_rle = [
+        idx + 1
+        for idx, sample in enumerate(samples)
+        if not isinstance(sample.get("rle"), list) or not sample.get("rle")
+    ]
+    if invalid_rle:
+        errors.append(f"segmentation samples missing non-empty rle: rows {invalid_rle}")
+    invalid_dimensions = [
+        idx + 1
+        for idx, sample in enumerate(samples)
+        if _positive_int(sample.get("original_width")) is None
+        or _positive_int(sample.get("original_height")) is None
+    ]
+    if invalid_dimensions:
+        errors.append(
+            "segmentation samples missing positive original dimensions: "
+            f"rows {invalid_dimensions}"
+        )
 
     return {
         "total_samples": total,

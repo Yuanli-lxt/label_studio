@@ -144,6 +144,57 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
             self.assertTrue(Path(module._IMAGE_SEG_ARTIFACT_PATH).exists())
             self.assertTrue(Path(module._IMAGE_SEG_LAST_DATASET_PATH).exists())
 
+    def test_manual_segmentation_sample_falls_back_to_image_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            module = self._module(tmp_dir)
+            valid_path = str(ROOT / "demo_data" / "local-files" / "images" / "demo_blue.png")
+            payload = {
+                "task_type": "image_segmentation",
+                "samples": [
+                    {
+                        "image": "/missing.png",
+                        "image_path": valid_path,
+                        "label": "Object",
+                        "rle": [0, 1, 2, 3],
+                        "original_width": 320,
+                        "original_height": 240,
+                    }
+                ],
+            }
+
+            normalized = module._normalize_manual_image_segmentation_samples(payload["samples"])
+            dataset_samples, _ = module._build_image_segmentation_dataset(payload)
+
+            self.assertEqual(1, len(normalized))
+            self.assertEqual(valid_path, normalized[0]["image_path"])
+            self.assertEqual(valid_path, normalized[0]["image"])
+            self.assertEqual(1, len(dataset_samples))
+            self.assertEqual(valid_path, dataset_samples[0]["image_path"])
+
+    def test_train_placeholder_segmentation_rejects_invalid_rle_and_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            module = self._module(tmp_dir)
+            valid_path = str(ROOT / "demo_data" / "local-files" / "images" / "demo_blue.png")
+            base_sample = {
+                "image": "/data/local-files/?d=images/demo_blue.png",
+                "image_path": valid_path,
+                "label": "Object",
+                "rle": [0, 1, 2, 3],
+                "original_width": 320,
+                "original_height": 240,
+            }
+
+            empty_rle = dict(base_sample, rle=[])
+            bad_dimensions = dict(base_sample, original_width=0, original_height=0)
+
+            with self.assertRaisesRegex(ValueError, "rle"):
+                module._train_placeholder_image_segmentation([empty_rle], training_run=1)
+
+            with self.assertRaisesRegex(ValueError, "dimensions"):
+                module._train_placeholder_image_segmentation([bad_dimensions], training_run=1)
+
     def test_run_training_routes_image_segmentation(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
