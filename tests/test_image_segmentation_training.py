@@ -181,6 +181,31 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
             self.assertEqual(1, len(dataset_samples))
             self.assertEqual(valid_path, dataset_samples[0]["image_path"])
 
+    def test_dedupe_image_segmentation_samples_respects_dataset_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = self._module(Path(tmp))
+            valid_path = str(ROOT / "demo_data" / "local-files" / "images" / "demo_blue.png")
+            base_sample = {
+                "image": "/data/local-files/?d=images/demo_blue.png",
+                "image_path": valid_path,
+                "label": "Object",
+                "rle": [0, 1, 2, 3],
+                "original_width": 320,
+                "original_height": 240,
+            }
+            samples = [
+                dict(base_sample, dataset_split="train", annotation_id=1, rle=[1]),
+                dict(base_sample, dataset_split="eval", annotation_id=2, rle=[2]),
+                dict(base_sample, dataset_split="train", annotation_id=3, rle=[3]),
+            ]
+
+            deduped = module._dedupe_image_segmentation_samples(samples)
+
+            self.assertEqual(2, len(deduped))
+            self.assertEqual(["train", "eval"], [sample["dataset_split"] for sample in deduped])
+            self.assertEqual([3, 2], [sample["annotation_id"] for sample in deduped])
+            self.assertEqual([[3], [2]], [sample["rle"] for sample in deduped])
+
     def test_train_placeholder_segmentation_rejects_invalid_rle_and_dimensions(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

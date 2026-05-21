@@ -1391,6 +1391,7 @@ def _normalize_manual_image_segmentation_samples(samples):
         rle = sample.get("rle")
         original_width = _positive_int(sample.get("original_width"))
         original_height = _positive_int(sample.get("original_height"))
+        dataset_split = _normalize_dataset_split(sample.get("dataset_split") or sample.get("split"))
         if not image_path or label is None or not isinstance(rle, list) or not rle:
             continue
         if original_width is None or original_height is None:
@@ -1404,6 +1405,7 @@ def _normalize_manual_image_segmentation_samples(samples):
                 "rle": rle,
                 "original_width": original_width,
                 "original_height": original_height,
+                "dataset_split": dataset_split,
                 "task_id": sample.get("task_id"),
                 "annotation_id": sample.get("annotation_id"),
                 "project_id": sample.get("project_id"),
@@ -1424,6 +1426,9 @@ def _parse_image_segmentation_export_task(task):
     image_path = _resolve_image_file_path(image_ref)
     if not image_path:
         return []
+    dataset_split = _normalize_dataset_split(
+        meta.get("dataset_split") or meta.get("split") or data.get("dataset_split") or data.get("split")
+    )
 
     annotations = task.get("annotations")
     if not isinstance(annotations, list):
@@ -1446,6 +1451,7 @@ def _parse_image_segmentation_export_task(task):
                 "project_id": _normalize_project_id(task.get("project")),
                 "annotation_id": annotation.get("id"),
                 "updated_at": _normalize_text(annotation.get("updated_at") or annotation.get("created_at")),
+                "dataset_split": dataset_split,
                 "source": "label_studio_export",
                 **mask,
             }
@@ -1468,7 +1474,11 @@ def _dedupe_image_segmentation_samples(samples):
     deduped = {}
     order = []
     for sample in samples:
-        dedupe_key = (sample.get("image_path", ""), sample.get("label", ""))
+        dedupe_key = (
+            sample.get("image_path", ""),
+            sample.get("label", ""),
+            sample.get("dataset_split") or "train",
+        )
         if dedupe_key not in deduped:
             order.append(dedupe_key)
         deduped[dedupe_key] = sample
