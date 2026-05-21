@@ -24,6 +24,10 @@ TEXT_MODEL_ARTIFACTS_DIR = os.getenv(
     os.getenv("MODEL_ARTIFACTS_DIR", "/model-state/text_classifier"),
 )
 IMAGE_MODEL_ARTIFACTS_DIR = os.getenv("IMAGE_MODEL_ARTIFACTS_DIR", "/model-state/image_classifier")
+IMAGE_SEG_MODEL_ARTIFACTS_DIR = os.getenv(
+    "IMAGE_SEG_MODEL_ARTIFACTS_DIR",
+    "/model-state/image_segmentation",
+)
 IMAGE_LOCAL_FILES_ROOT = os.getenv("IMAGE_LOCAL_FILES_ROOT", "/demo-local-files")
 TRAINER_URL = os.getenv("TRAINER_URL", "http://trainer:9091/train")
 TRAINER_WEBHOOK_URL = os.getenv("TRAINER_WEBHOOK_URL", "http://trainer:9091/webhook/label-studio")
@@ -41,6 +45,8 @@ _TEXT_VECTORIZER_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "vectorizer.jobli
 _TEXT_METADATA_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "metadata.json")
 _IMAGE_CLASSIFIER_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "classifier.joblib")
 _IMAGE_METADATA_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "metadata.json")
+_IMAGE_SEG_ARTIFACT_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "segmenter.joblib")
+_IMAGE_SEG_METADATA_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "metadata.json")
 
 _TEXT_MODEL_LOCK = threading.Lock()
 _TEXT_MODEL_CACHE = {
@@ -75,6 +81,13 @@ def _default_state():
             "model_version": None,
             "trained_at": None,
             "metadata_path": _IMAGE_METADATA_PATH,
+        },
+        "image_segmentation": {
+            "active": False,
+            "model_version": None,
+            "trained_at": None,
+            "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
+            "metadata_path": _IMAGE_SEG_METADATA_PATH,
         },
         "behavior": {
             "image_positive_tokens": ["blue", "product", "object", "demo_blue"],
@@ -132,6 +145,8 @@ def _load_model_state():
         state["text_classifier"].update(loaded["text_classifier"])
     if isinstance(loaded.get("image_classifier"), dict):
         state["image_classifier"].update(loaded["image_classifier"])
+    if isinstance(loaded.get("image_segmentation"), dict):
+        state["image_segmentation"].update(loaded["image_segmentation"])
     return state
 
 
@@ -271,6 +286,7 @@ def _parse_label_config(label_config):
         "text_name": "text",
         "choices": None,
         "rectanglelabels": None,
+        "brushlabels": None,
         "labels": None,
     }
 
@@ -301,6 +317,12 @@ def _parse_label_config(label_config):
         default_name="bbox_label",
         default_to_name=parsed["image_name"],
     )
+    parsed["brushlabels"] = _extract_control(
+        root,
+        "BrushLabels",
+        default_name="mask_label",
+        default_to_name=parsed["image_name"],
+    )
     parsed["labels"] = _extract_control(
         root,
         "Labels",
@@ -316,9 +338,12 @@ def _infer_mode(parsed, tasks):
     text_name = parsed["text_name"]
 
     rect = parsed["rectanglelabels"]
+    brush = parsed["brushlabels"]
     choices = parsed["choices"]
     labels = parsed["labels"]
 
+    if brush and brush.get("to_name") == image_name:
+        return "image_segmentation"
     if rect and rect.get("to_name") == image_name:
         return "image_detection"
     if labels and labels.get("to_name") == text_name:
@@ -607,6 +632,96 @@ def _image_detection(task, parsed, state):
     }
 
 
+def _image_dimensions(task):
+    image_path = _resolve_image_file_path(task.get("data", {}).get("image"))
+    if image_path and Image is not None:
+        try:
+            with Image.open(image_path) as img:
+                width, height = img.size
+                if width > 0 and height > 0:
+                    return int(width), int(height)
+        except Exception:
+            pass
+    return DEFAULT_IMAGE_WIDTH, DEFAULT_IMAGE_HEIGHT
+
+
+def _fallback_mask_rle(width, height):
+    mask_left = max(0, width // 4)
+    mask_right = min(width, width - mask_left)
+    mask_top = max(0, height // 4)
+    mask_bottom = min(height, height - mask_top)
+
+    runs = []
+    current = 0
+    length = 0
+    for y in range(height):
+        for x in range(width):
+            value = 1 if mask_left <= x < mask_right and mask_top <= y < mask_bottom else 0
+            if value == current:
+                length += 1
+            else:
+                runs.append(length)
+                current = value
+                length = 1
+    runs.append(length)
+    return runs
+
+
+def _placeholder_segmentation_rle(width, height):
+    try:
+        from label_studio_converter.brush import mask2rle
+
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[height // 4 : max(height // 4 + 1, (height * 3) // 4), width // 4 : max(width // 4 + 1, (width * 3) // 4)] = 1
+        return mask2rle(mask)
+    except Exception:
+        return _fallback_mask_rle(width, height)
+
+
+def _image_segmentation(task, parsed, state):
+    brush = parsed["brushlabels"] or {
+        "name": "mask_label",
+        "to_name": parsed["image_name"],
+        "labels": ["Object"],
+    }
+    label = (brush.get("labels") or ["Object"])[0]
+    width, height = _image_dimensions(task)
+    score_value = _score(0.65, state)
+    model_version = (
+        state.get("image_segmentation", {}).get("model_version")
+        or state["model_version"]
+    )
+
+    result = {
+        "id": f"{task.get('id', 'task')}_mask",
+        "from_name": brush["name"],
+        "to_name": brush["to_name"],
+        "type": "brushlabels",
+        "original_width": width,
+        "original_height": height,
+        "image_rotation": 0,
+        "value": {
+            "format": "rle",
+            "rle": _placeholder_segmentation_rle(width, height),
+            "brushlabels": [label],
+        },
+    }
+
+    prediction_source = "placeholder-image-segmentation"
+    return {
+        "model_version": model_version,
+        "score": score_value,
+        "result": [result],
+        "prediction_source": prediction_source,
+        "confidence": {
+            "prediction_source": prediction_source,
+            "confidence": score_value,
+            "confidence_bucket": _confidence_bucket(score_value),
+            "uncertain": False,
+        },
+    }
+
+
 def _normalize_predicted_label(predicted, supported_labels):
     if not supported_labels:
         return predicted
@@ -830,7 +945,9 @@ def _predict(payload):
 
     predictions = []
     for task in tasks:
-        if mode == "image_detection":
+        if mode == "image_segmentation":
+            predictions.append(_image_segmentation(task, parsed, state))
+        elif mode == "image_detection":
             predictions.append(_image_detection(task, parsed, state))
         elif mode == "text_ner":
             predictions.append(_text_ner(task, parsed, state))
@@ -841,7 +958,7 @@ def _predict(payload):
         else:
             predictions.append({"model_version": state["model_version"], "score": 0.1, "result": []})
 
-    if mode in ("text_classification", "image_classification") and predictions:
+    if mode in ("text_classification", "image_classification", "image_segmentation") and predictions:
         top_version = predictions[0].get("model_version", state["model_version"])
     else:
         top_version = state["model_version"]
