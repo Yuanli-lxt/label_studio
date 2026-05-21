@@ -2252,6 +2252,7 @@ def _run_deterministic_fallback(payload, trigger, train_error=None):
         "behavior": _behavior_for_run(training_run),
         "text_classifier": current.get("text_classifier", _default_state()["text_classifier"]),
         "image_classifier": current.get("image_classifier", _default_state()["image_classifier"]),
+        "image_segmentation": current.get("image_segmentation", _default_state()["image_segmentation"]),
         "last_training_event": train_record,
     }
 
@@ -2326,6 +2327,7 @@ def _run_text_training(payload, trigger):
                 },
             },
             "image_classifier": current.get("image_classifier", _default_state()["image_classifier"]),
+            "image_segmentation": current.get("image_segmentation", _default_state()["image_segmentation"]),
             "last_training_event": train_record,
         }
 
@@ -2416,6 +2418,7 @@ def _run_image_training(payload, trigger):
                     "label_distribution": metadata["dataset"]["quality"]["label_distribution"],
                 },
             },
+            "image_segmentation": current.get("image_segmentation", _default_state()["image_segmentation"]),
             "last_training_event": train_record,
         }
 

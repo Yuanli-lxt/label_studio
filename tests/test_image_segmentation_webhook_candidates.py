@@ -250,6 +250,29 @@ class ImageSegmentationWebhookCandidatesTests(unittest.TestCase):
             self.assertEqual(30, rows[0]["project_id"])
             self.assertEqual("Object", rows[0]["label"])
 
+    def test_deterministic_fallback_preserves_active_segmentation_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            image_root = self._prepare_image_root(tmp_dir)
+            module = self._module(tmp_dir, image_root)
+            segmentation_state = {
+                "active": True,
+                "model_version": "image-seg-v7",
+                "trained_at": "2026-05-21T08:00:00Z",
+                "artifact_path": str(tmp_dir / "image_seg_artifacts" / "model.joblib"),
+                "metadata_path": str(tmp_dir / "image_seg_artifacts" / "metadata.json"),
+            }
+            current = module._default_state()
+            current["training_run"] = 3
+            current["image_segmentation"] = segmentation_state
+            module._save_state(current)
+
+            outcome = module._run_deterministic_fallback({}, "unit-test")
+
+            self.assertEqual(segmentation_state, outcome["next_state"]["image_segmentation"])
+            persisted = json.loads(Path(module.MODEL_STATE_PATH).read_text(encoding="utf-8"))
+            self.assertEqual(segmentation_state, persisted["image_segmentation"])
+
 
 if __name__ == "__main__":
     unittest.main()
