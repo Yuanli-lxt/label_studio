@@ -1,6 +1,7 @@
 # Local environment
 .env
 .venv/
+.worktrees/
 
 # Python cache and bytecode
 __pycache__/
