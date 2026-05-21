@@ -7,6 +7,7 @@ import types
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 ML_BACKEND_APP = ROOT / "services" / "ml-backend" / "app.py"
@@ -127,6 +128,35 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual(0.65, prediction["score"])
             self.assertEqual(0.65, prediction["confidence"]["confidence"])
             self.assertEqual("medium", prediction["confidence"]["confidence_bucket"])
+
+    def test_segmentation_fallback_rle_encoder_is_marked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+
+            original_import = __import__
+
+            def block_label_studio_converter(name, *args, **kwargs):
+                if name.startswith("label_studio_converter"):
+                    raise ImportError("blocked label_studio_converter for test")
+                return original_import(name, *args, **kwargs)
+
+            with patch("builtins.__import__", side_effect=block_label_studio_converter):
+                response = backend._predict(
+                    {
+                        "label_config": config,
+                        "tasks": [
+                            {
+                                "id": "seg-fallback",
+                                "data": {"image": "/data/local-files/?d=images/demo_blue.png"},
+                            }
+                        ],
+                    }
+                )
+
+            prediction = response["results"][0]
+            self.assertEqual("fallback-minimal", prediction["confidence"]["rle_encoder"])
+            self.assertEqual("rle", prediction["result"][0]["value"]["format"])
 
 
 if __name__ == "__main__":

@@ -673,9 +673,9 @@ def _placeholder_segmentation_rle(width, height):
 
         mask = np.zeros((height, width), dtype=np.uint8)
         mask[height // 4 : max(height // 4 + 1, (height * 3) // 4), width // 4 : max(width // 4 + 1, (width * 3) // 4)] = 1
-        return mask2rle(mask)
+        return mask2rle(mask), "label-studio-converter"
     except Exception:
-        return _fallback_mask_rle(width, height)
+        return _fallback_mask_rle(width, height), "fallback-minimal"
 
 
 def _image_segmentation(task, parsed, state):
@@ -686,6 +686,7 @@ def _image_segmentation(task, parsed, state):
     }
     label = (brush.get("labels") or ["Object"])[0]
     width, height = _image_dimensions(task)
+    rle, rle_encoder = _placeholder_segmentation_rle(width, height)
     score_value = 0.65
     model_version = (
         state.get("image_segmentation", {}).get("model_version")
@@ -702,7 +703,7 @@ def _image_segmentation(task, parsed, state):
         "image_rotation": 0,
         "value": {
             "format": "rle",
-            "rle": _placeholder_segmentation_rle(width, height),
+            "rle": rle,
             "brushlabels": [label],
         },
     }
@@ -718,6 +719,7 @@ def _image_segmentation(task, parsed, state):
             "confidence": score_value,
             "confidence_bucket": _confidence_bucket(score_value),
             "uncertain": False,
+            "rle_encoder": rle_encoder,
         },
     }
 
