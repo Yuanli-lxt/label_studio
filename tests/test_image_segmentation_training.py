@@ -140,6 +140,10 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
             self.assertEqual("image-seg-v0003", metadata["model_version"])
             self.assertEqual(1, metadata["dataset"]["total_size"])
             self.assertEqual({"Object": 1}, metadata["dataset"]["quality"]["label_distribution"])
+            self.assertEqual(
+                ["SAM", "YOLO-seg", "Detectron2", "custom"],
+                metadata["model_details"]["replaceable_with"],
+            )
             self.assertEqual(module._IMAGE_SEG_METADATA_PATH, metadata["artifacts"]["metadata_path"])
             self.assertEqual(
                 module._IMAGE_SEG_ARTIFACT_PATH,

@@ -2478,9 +2478,10 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
             "name": "placeholder_center_mask",
             "rle_format": "label_studio_brush",
             "replaceable_with": [
-                "supervised_instance_segmentation",
-                "semantic_segmentation",
-                "foundation_model_promptable_segmentation",
+                "SAM",
+                "YOLO-seg",
+                "Detectron2",
+                "custom",
             ],
         },
         "artifacts": {
