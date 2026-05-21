@@ -79,7 +79,7 @@ _TEXT_LAST_DATASET_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "last_training_
 _IMAGE_CLASSIFIER_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "classifier.joblib")
 _IMAGE_METADATA_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "metadata.json")
 _IMAGE_LAST_DATASET_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "last_training_dataset.jsonl")
-_IMAGE_SEG_ARTIFACT_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "segmenter.joblib")
+_IMAGE_SEG_ARTIFACT_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "placeholder_model.json")
 _IMAGE_SEG_METADATA_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "metadata.json")
 _IMAGE_SEG_LAST_DATASET_PATH = os.path.join(
     IMAGE_SEG_MODEL_ARTIFACTS_DIR,

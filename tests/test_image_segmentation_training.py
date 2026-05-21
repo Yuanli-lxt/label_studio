@@ -149,6 +149,10 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
                 module._IMAGE_SEG_ARTIFACT_PATH,
                 metadata["artifacts"]["placeholder_model_path"],
             )
+            self.assertEqual("placeholder_model.json", Path(module._IMAGE_SEG_ARTIFACT_PATH).name)
+            self.assertTrue(
+                metadata["artifacts"]["placeholder_model_path"].endswith("placeholder_model.json")
+            )
             self.assertTrue(Path(module._IMAGE_SEG_METADATA_PATH).exists())
             self.assertTrue(Path(module._IMAGE_SEG_ARTIFACT_PATH).exists())
             self.assertTrue(Path(module._IMAGE_SEG_LAST_DATASET_PATH).exists())
