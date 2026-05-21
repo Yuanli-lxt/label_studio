@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -101,6 +102,31 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual(["Object"], result["value"]["brushlabels"])
             self.assertIsInstance(result["value"]["rle"], list)
             self.assertGreater(len(result["value"]["rle"]), 0)
+
+    def test_segmentation_placeholder_score_ignores_state_boost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            (tmp_dir / "current_model.json").write_text(
+                json.dumps({"behavior": {"score_boost": 0.2}}),
+                encoding="utf-8",
+            )
+            backend = self._backend(tmp_dir)
+            config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+            response = backend._predict(
+                {
+                    "label_config": config,
+                    "tasks": [
+                        {
+                            "id": "seg-boost",
+                            "data": {"image": "/data/local-files/?d=images/demo_blue.png"},
+                        }
+                    ],
+                }
+            )
+            prediction = response["results"][0]
+            self.assertEqual(0.65, prediction["score"])
+            self.assertEqual(0.65, prediction["confidence"]["confidence"])
+            self.assertEqual("medium", prediction["confidence"]["confidence_bucket"])
 
 
 if __name__ == "__main__":

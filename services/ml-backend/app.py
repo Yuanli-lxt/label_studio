@@ -686,7 +686,7 @@ def _image_segmentation(task, parsed, state):
     }
     label = (brush.get("labels") or ["Object"])[0]
     width, height = _image_dimensions(task)
-    score_value = _score(0.65, state)
+    score_value = 0.65
     model_version = (
         state.get("image_segmentation", {}).get("model_version")
         or state["model_version"]
