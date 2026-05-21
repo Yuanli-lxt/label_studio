@@ -140,6 +140,11 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
             self.assertEqual("image-seg-v0003", metadata["model_version"])
             self.assertEqual(1, metadata["dataset"]["total_size"])
             self.assertEqual({"Object": 1}, metadata["dataset"]["quality"]["label_distribution"])
+            self.assertEqual(module._IMAGE_SEG_METADATA_PATH, metadata["artifacts"]["metadata_path"])
+            self.assertEqual(
+                module._IMAGE_SEG_ARTIFACT_PATH,
+                metadata["artifacts"]["placeholder_model_path"],
+            )
             self.assertTrue(Path(module._IMAGE_SEG_METADATA_PATH).exists())
             self.assertTrue(Path(module._IMAGE_SEG_ARTIFACT_PATH).exists())
             self.assertTrue(Path(module._IMAGE_SEG_LAST_DATASET_PATH).exists())
@@ -229,6 +234,19 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
             self.assertEqual("image_segmentation", module._normalize_task_type("image_segmentation"))
             self.assertEqual("image_segmentation", module._normalize_task_type("image-segmentation"))
             self.assertEqual("image_segmentation", module._resolve_task_type({"task_type": "image_segmentation"}))
+
+    def test_train_route_task_type_accepts_image_segmentation_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = self._module(Path(tmp))
+
+            self.assertEqual(
+                "image_segmentation",
+                module._train_route_task_type("/train/image-segmentation"),
+            )
+            self.assertEqual(
+                "image_segmentation",
+                module._train_route_task_type("/retrain/image-segmentation"),
+            )
 
 
 if __name__ == "__main__":

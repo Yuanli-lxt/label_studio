@@ -2485,6 +2485,8 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
         },
         "artifacts": {
             "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
+            "metadata_path": _IMAGE_SEG_METADATA_PATH,
+            "placeholder_model_path": _IMAGE_SEG_ARTIFACT_PATH,
         },
         "framework": {
             "library": "none",
@@ -2867,6 +2869,16 @@ def _run_training(payload, trigger, route_task_type=None):
     return outcome
 
 
+def _train_route_task_type(route):
+    if "image-segmentation" in route:
+        return "image_segmentation"
+    if "image-classification" in route:
+        return "image_classification"
+    if "text-classification" in route:
+        return "text_classification"
+    return None
+
+
 def _read_text_classifier_metadata():
     data = _read_json(_TEXT_METADATA_PATH)
     if isinstance(data, dict):
@@ -2944,13 +2956,10 @@ class TrainerHandler(BaseHTTPRequestHandler):
             "/retrain/text-classification",
             "/train/image-classification",
             "/retrain/image-classification",
+            "/train/image-segmentation",
+            "/retrain/image-segmentation",
         ):
-            route_task_type = None
-            if "image-classification" in route:
-                route_task_type = "image_classification"
-            elif "text-classification" in route:
-                route_task_type = "text_classification"
-
+            route_task_type = _train_route_task_type(route)
             outcome = _run_training(payload, trigger="manual-train", route_task_type=route_task_type)
             next_state = outcome["next_state"]
             train_record = outcome["train_record"]
