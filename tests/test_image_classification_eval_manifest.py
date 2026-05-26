@@ -14,7 +14,7 @@ class ImageEvalManifestTests(unittest.TestCase):
 
         images = data.get("images")
         self.assertIsInstance(images, list)
-        self.assertEqual(8, len(images))
+        self.assertEqual(30, len(images))
 
         seen = set()
         label_counts = {"Product": 0, "Other": 0}
@@ -29,7 +29,8 @@ class ImageEvalManifestTests(unittest.TestCase):
             self.assertIn(label, {"Product", "Other"})
             label_counts[label] += 1
 
-        self.assertEqual({"Product": 4, "Other": 4}, label_counts)
+        self.assertEqual({"Product": 15, "Other": 15}, label_counts)
+        self.assertIn("demo_other_lowlight.png", seen)
 
 
 if __name__ == "__main__":

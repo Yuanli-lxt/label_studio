@@ -166,10 +166,13 @@ Training dataset:
 - `demo_data/tasks/image_classification_labeled_export.json`
 - `demo_data/tasks/image_classification_eval_manifest.json` (fixed independent eval image list)
 - `demo_data/tasks/image_classification_training_candidates.jsonl` (webhook/API captured training candidates)
+- `demo_data/tasks/image_classification_non_eval_review_tasks.json` (small non-eval human-review pool)
 - resolves image references like `/data/local-files/?d=images/demo_blue.png`
 - reads actual image pixels from mounted local root
 - uses a fixed split marker per task in `meta.dataset_split` (`train` / `eval`)
 - fixed eval set id: `image-cls-eval-v1` (kept out of training for stable cross-version metrics)
+- deterministic synthetic data generator: `scripts/generate_image_classification_demo_dataset.py`
+- default generated size: `90 Product train`, `90 Other train`, `15 Product eval`, `15 Other eval`
 
 Model approach:
 - handcrafted color/statistical features from each image
@@ -198,6 +201,12 @@ Export review tasks (misclassified or low-confidence eval cases) for Label Studi
 scripts/export_image_review_tasks_from_metadata.sh
 ```
 
+Create a small non-eval review pool to prove human corrections can enter retrain:
+
+```bash
+scripts/create_non_eval_image_review_tasks.py
+```
+
 Bootstrap/import a reproducible Label Studio human-review project:
 
 ```bash
@@ -205,6 +214,7 @@ export LABEL_STUDIO_URL=http://localhost:18080
 export LABEL_STUDIO_API_TOKEN='<your-token>'
 scripts/bootstrap_label_studio_image_review.py
 scripts/import_image_review_tasks_to_label_studio.py
+scripts/import_image_review_tasks_to_label_studio.py --tasks-path demo_data/tasks/image_classification_non_eval_review_tasks.json
 ```
 
 Or run the automated portion of the flow check:
@@ -246,9 +256,9 @@ Trainer/ML model metadata endpoints:
 - `http://localhost:9091/models/image-classification/current`
 - `http://localhost:9090/models/image-classification/current`
 
-## Image Segmentation HITL (Placeholder Model)
+## Image Segmentation HITL (SAM/MobileSAM Optional)
 
-Image segmentation has a first-version Brush/mask human-review loop. It uses a single foreground label, `Object`, and a deterministic placeholder model so the Label Studio -> prediction -> human correction -> webhook -> training data -> retrain -> new pre-label contract is testable before a real segmentation model is plugged in.
+Image segmentation has a first-version Brush/mask human-review loop. It uses a single foreground label, `Object`, and keeps the Label Studio -> prediction -> human correction -> webhook -> training data -> retrain -> new pre-label contract testable. By default it uses the deterministic placeholder mask; set `IMAGE_SEG_BACKEND` to use a real SAM-compatible image backend for pre-labels.
 
 Label config:
 - `label_configs/image_segmentation.xml`
@@ -257,6 +267,26 @@ Artifact location:
 - `demo_data/model_state/image_segmentation/metadata.json`
 - `demo_data/model_state/image_segmentation/placeholder_model.json`
 - `demo_data/model_state/image_segmentation/last_training_dataset.jsonl`
+
+Runtime pre-label backend:
+
+```bash
+# default, no heavyweight model dependency
+export IMAGE_SEG_BACKEND=placeholder
+
+# lightweight SAM-compatible path
+export IMAGE_SEG_BACKEND=mobilesam
+export IMAGE_SEG_MODEL_TYPE=vit_t
+export IMAGE_SEG_CHECKPOINT=/model-state/image_segmentation/mobile_sam.pt
+export IMAGE_SEG_DEVICE=cpu
+
+# SAM2 path
+export IMAGE_SEG_BACKEND=sam2
+export IMAGE_SEG_MODEL_ID=facebook/sam2-hiera-large
+export IMAGE_SEG_DEVICE=cuda
+```
+
+The ML backend expects the optional model libraries to be installed in the runtime image when `IMAGE_SEG_BACKEND` is `mobilesam`, `sam`, or `sam2`. If a real backend is requested but unavailable, prediction falls back to the placeholder mask and includes `requested_backend`, `backend_error`, and `fallback` in prediction confidence metadata. The current prompt strategy is a center-box prompt so the Label Studio contract is usable before object-specific prompts are added.
 
 Bootstrap/import a segmentation review project:
 
@@ -267,7 +297,7 @@ scripts/bootstrap_label_studio_image_segmentation_review.py
 scripts/import_image_segmentation_review_tasks_to_label_studio.py
 ```
 
-Trigger and inspect placeholder retrain:
+Trigger and inspect segmentation retrain:
 
 ```bash
 scripts/trigger_image_segmentation_retrain.sh

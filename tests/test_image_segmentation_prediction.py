@@ -185,6 +185,107 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual("image-seg-v0042", response["model_version"])
             self.assertEqual("image-seg-v0042", response["results"][0]["model_version"])
 
+    def test_mobilesam_backend_returns_real_backend_prediction_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            checkpoint = tmp_dir / "mobile_sam.pt"
+            checkpoint.write_text("fake checkpoint", encoding="utf-8")
+            fake_segment_anything = types.ModuleType("segment_anything")
+
+            class FakeModel:
+                def to(self, device=None):
+                    self.device = device
+                    return self
+
+            class FakePredictor:
+                def __init__(self, model):
+                    self.model = model
+
+                def set_image(self, image):
+                    self.image = image
+
+                def predict(self, box=None, multimask_output=False):
+                    mask = [[0 for _ in range(10)] for _ in range(8)]
+                    for y in range(2, 6):
+                        for x in range(3, 8):
+                            mask[y][x] = 1
+                    return [mask], [0.91], None
+
+            fake_segment_anything.sam_model_registry = {
+                "vit_t": lambda checkpoint=None: FakeModel(),
+            }
+            fake_segment_anything.SamPredictor = FakePredictor
+
+            with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}):
+                backend = load_backend(
+                    {
+                        "MODEL_STATE_PATH": str(tmp_dir / "current_model.json"),
+                        "TEXT_MODEL_ARTIFACTS_DIR": str(tmp_dir / "text_artifacts"),
+                        "IMAGE_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_artifacts"),
+                        "IMAGE_SEG_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_segmentation"),
+                        "IMAGE_LOCAL_FILES_ROOT": str(ROOT / "demo_data" / "local-files"),
+                        "IMAGE_SEG_BACKEND": "mobilesam",
+                        "IMAGE_SEG_MODEL_TYPE": "vit_t",
+                        "IMAGE_SEG_CHECKPOINT": str(checkpoint),
+                        "IMAGE_SEG_DEVICE": "cpu",
+                    }
+                )
+                backend._load_image_rgb_array = lambda image_path: [[0, 0, 0]]
+                config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+                response = backend._predict(
+                    {
+                        "label_config": config,
+                        "tasks": [
+                            {
+                                "id": "seg-mobile",
+                                "data": {"image": "/data/local-files/?d=images/demo_blue.png"},
+                            }
+                        ],
+                    }
+                )
+
+            prediction = response["results"][0]
+            self.assertEqual("mobilesam-image-segmentation", prediction["prediction_source"])
+            self.assertEqual("mobilesam-image-segmentation", prediction["confidence"]["prediction_source"])
+            self.assertEqual("mobilesam", prediction["confidence"]["backend"])
+            self.assertGreaterEqual(prediction["score"], 0.9)
+            self.assertIsInstance(prediction["result"][0]["value"]["rle"], list)
+            self.assertGreater(len(prediction["result"][0]["value"]["rle"]), 0)
+
+    def test_sam2_backend_missing_dependency_falls_back_with_backend_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            backend = load_backend(
+                {
+                    "MODEL_STATE_PATH": str(tmp_dir / "current_model.json"),
+                    "TEXT_MODEL_ARTIFACTS_DIR": str(tmp_dir / "text_artifacts"),
+                    "IMAGE_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_artifacts"),
+                    "IMAGE_SEG_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_segmentation"),
+                    "IMAGE_LOCAL_FILES_ROOT": str(ROOT / "demo_data" / "local-files"),
+                    "IMAGE_SEG_BACKEND": "sam2",
+                    "IMAGE_SEG_MODEL_ID": "facebook/sam2-hiera-large",
+                    "IMAGE_SEG_DEVICE": "cpu",
+                }
+            )
+            config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+            response = backend._predict(
+                {
+                    "label_config": config,
+                    "tasks": [
+                        {
+                            "id": "seg-sam2-missing",
+                            "data": {"image": "/data/local-files/?d=images/demo_blue.png"},
+                        }
+                    ],
+                }
+            )
+
+            prediction = response["results"][0]
+            self.assertEqual("placeholder-image-segmentation", prediction["prediction_source"])
+            self.assertEqual("sam2", prediction["confidence"]["requested_backend"])
+            self.assertIn("backend_error", prediction["confidence"])
+            self.assertNotEqual("", prediction["confidence"]["backend_error"])
+
 
 if __name__ == "__main__":
     unittest.main()

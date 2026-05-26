@@ -14,3 +14,5 @@ Local URLs:
 
 
 目的:它比较适合这些场景：做训练数据集；给大模型/RAG/Agent 做人工评测
+
+使用 Superpowers 的流程，自动选择合适的 skills。不要跳过设计、测试、review 和验证。

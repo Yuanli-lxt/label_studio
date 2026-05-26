@@ -47,6 +47,11 @@ _IMAGE_CLASSIFIER_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "classifier.job
 _IMAGE_METADATA_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "metadata.json")
 _IMAGE_SEG_ARTIFACT_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "placeholder_model.json")
 _IMAGE_SEG_METADATA_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "metadata.json")
+IMAGE_SEG_BACKEND = os.getenv("IMAGE_SEG_BACKEND", "placeholder").strip().lower()
+IMAGE_SEG_MODEL_TYPE = os.getenv("IMAGE_SEG_MODEL_TYPE", "vit_t").strip()
+IMAGE_SEG_CHECKPOINT = os.getenv("IMAGE_SEG_CHECKPOINT", "").strip()
+IMAGE_SEG_MODEL_ID = os.getenv("IMAGE_SEG_MODEL_ID", "facebook/sam2-hiera-large").strip()
+IMAGE_SEG_DEVICE = os.getenv("IMAGE_SEG_DEVICE", "cpu").strip()
 
 _TEXT_MODEL_LOCK = threading.Lock()
 _TEXT_MODEL_CACHE = {
@@ -55,6 +60,11 @@ _TEXT_MODEL_CACHE = {
 }
 _IMAGE_MODEL_LOCK = threading.Lock()
 _IMAGE_MODEL_CACHE = {
+    "fingerprint": None,
+    "bundle": None,
+}
+_IMAGE_SEG_MODEL_LOCK = threading.Lock()
+_IMAGE_SEG_MODEL_CACHE = {
     "fingerprint": None,
     "bundle": None,
 }
@@ -672,15 +682,231 @@ def _fallback_mask_rle(width, height):
     return runs
 
 
-def _placeholder_segmentation_rle(width, height):
+def _binary_mask_to_minimal_rle(mask):
+    runs = []
+    current = 0
+    length = 0
+    for value in _iter_binary_mask_values(mask):
+        value = int(value)
+        if value == current:
+            length += 1
+        else:
+            runs.append(length)
+            current = value
+            length = 1
+    runs.append(length)
+    return runs
+
+
+def _iter_binary_mask_values(mask):
+    if hasattr(mask, "ndim") and hasattr(mask, "reshape"):
+        arr = mask
+        if arr.ndim == 3:
+            arr = arr[0]
+        try:
+            arr = (arr > 0).astype(np.uint8)
+        except Exception:
+            pass
+        for value in arr.reshape(-1):
+            yield 1 if int(value) > 0 else 0
+        return
+
+    if isinstance(mask, (list, tuple)):
+        for item in mask:
+            if isinstance(item, (list, tuple)) or hasattr(item, "reshape"):
+                for nested in _iter_binary_mask_values(item):
+                    yield nested
+            else:
+                yield 1 if int(item) > 0 else 0
+        return
+
+    yield 1 if int(mask) > 0 else 0
+
+
+def _encode_segmentation_mask_rle(mask):
     try:
         from label_studio_converter.brush import mask2rle
 
+        arr = np.asarray(mask) if hasattr(np, "asarray") else mask
+        if hasattr(arr, "ndim") and arr.ndim == 3:
+            arr = arr[0]
+        if hasattr(arr, "astype"):
+            arr = (arr > 0).astype(np.uint8)
+        return mask2rle(arr), "label-studio-converter"
+    except Exception:
+        return _binary_mask_to_minimal_rle(mask), "fallback-minimal"
+
+
+def _placeholder_segmentation_rle(width, height):
+    try:
         mask = np.zeros((height, width), dtype=np.uint8)
         mask[height // 4 : max(height // 4 + 1, (height * 3) // 4), width // 4 : max(width // 4 + 1, (width * 3) // 4)] = 1
-        return mask2rle(mask), "label-studio-converter"
+        return _encode_segmentation_mask_rle(mask)
     except Exception:
         return _fallback_mask_rle(width, height), "fallback-minimal"
+
+
+def _normalize_image_segmentation_backend(value):
+    normalized = str(value or "placeholder").strip().lower().replace("-", "_")
+    aliases = {
+        "mobile_sam": "mobilesam",
+        "mobile": "mobilesam",
+        "segment_anything": "sam",
+        "segmentanything": "sam",
+        "sam_v1": "sam",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _selected_image_segmentation_backend(metadata):
+    env_backend = _normalize_image_segmentation_backend(IMAGE_SEG_BACKEND)
+    if env_backend != "placeholder":
+        return env_backend
+    if isinstance(metadata, dict):
+        metadata_backend = metadata.get("backend")
+        if not metadata_backend and isinstance(metadata.get("model"), dict):
+            metadata_backend = metadata["model"].get("backend")
+        if metadata_backend:
+            return _normalize_image_segmentation_backend(metadata_backend)
+    return "placeholder"
+
+
+def _image_segmentation_device():
+    if IMAGE_SEG_DEVICE and IMAGE_SEG_DEVICE.lower() != "auto":
+        return IMAGE_SEG_DEVICE
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def _load_image_rgb_array(image_path):
+    if Image is None:
+        raise ValueError("Pillow is required for SAM image segmentation inference")
+    with Image.open(image_path) as img:
+        rgb = img.convert("RGB")
+        if hasattr(np, "asarray"):
+            return np.asarray(rgb)
+        return list(rgb.getdata())
+
+
+def _center_box_prompt(width, height):
+    left = max(0.0, float(width) * 0.18)
+    top = max(0.0, float(height) * 0.18)
+    right = min(float(width - 1), float(width) * 0.82)
+    bottom = min(float(height - 1), float(height) * 0.82)
+    if hasattr(np, "asarray") and hasattr(np, "float32"):
+        return np.asarray([left, top, right, bottom], dtype=np.float32)
+    return [left, top, right, bottom]
+
+
+def _load_sam2_image_predictor():
+    if not IMAGE_SEG_MODEL_ID:
+        raise ValueError("IMAGE_SEG_MODEL_ID is required for IMAGE_SEG_BACKEND=sam2")
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+    device = _image_segmentation_device()
+    try:
+        predictor = SAM2ImagePredictor.from_pretrained(IMAGE_SEG_MODEL_ID, device=device)
+    except TypeError:
+        predictor = SAM2ImagePredictor.from_pretrained(IMAGE_SEG_MODEL_ID)
+        model = getattr(predictor, "model", None)
+        if model is not None and hasattr(model, "to"):
+            model.to(device=device)
+    return predictor
+
+
+def _load_segment_anything_predictor():
+    if not IMAGE_SEG_CHECKPOINT:
+        raise ValueError("IMAGE_SEG_CHECKPOINT is required for IMAGE_SEG_BACKEND=mobilesam or sam")
+    from segment_anything import SamPredictor, sam_model_registry
+
+    if IMAGE_SEG_MODEL_TYPE not in sam_model_registry:
+        available = ", ".join(sorted(str(item) for item in sam_model_registry.keys()))
+        raise ValueError(f"unknown IMAGE_SEG_MODEL_TYPE={IMAGE_SEG_MODEL_TYPE}; available={available}")
+    model = sam_model_registry[IMAGE_SEG_MODEL_TYPE](checkpoint=IMAGE_SEG_CHECKPOINT)
+    if hasattr(model, "to"):
+        model.to(device=_image_segmentation_device())
+    return SamPredictor(model)
+
+
+def _load_image_segmentation_predictor(backend):
+    fingerprint = (
+        backend,
+        IMAGE_SEG_MODEL_TYPE,
+        IMAGE_SEG_CHECKPOINT,
+        IMAGE_SEG_MODEL_ID,
+        IMAGE_SEG_DEVICE,
+    )
+    with _IMAGE_SEG_MODEL_LOCK:
+        if _IMAGE_SEG_MODEL_CACHE["fingerprint"] == fingerprint and _IMAGE_SEG_MODEL_CACHE["bundle"]:
+            return _IMAGE_SEG_MODEL_CACHE["bundle"]
+
+        if backend == "sam2":
+            predictor = _load_sam2_image_predictor()
+        elif backend in {"mobilesam", "sam"}:
+            predictor = _load_segment_anything_predictor()
+        else:
+            raise ValueError(f"unsupported IMAGE_SEG_BACKEND={backend}")
+
+        bundle = {"backend": backend, "predictor": predictor}
+        _IMAGE_SEG_MODEL_CACHE["fingerprint"] = fingerprint
+        _IMAGE_SEG_MODEL_CACHE["bundle"] = bundle
+        return bundle
+
+
+def _predict_with_sam_image_backend(task, backend, width, height):
+    image_path = _resolve_image_file_path(task.get("data", {}).get("image"))
+    if not image_path:
+        raise ValueError("local image path is required for SAM image segmentation inference")
+
+    bundle = _load_image_segmentation_predictor(backend)
+    predictor = bundle["predictor"]
+    predictor.set_image(_load_image_rgb_array(image_path))
+    masks, scores, _ = predictor.predict(box=_center_box_prompt(width, height), multimask_output=False)
+    selected_mask = _select_first_mask(masks)
+    if selected_mask is None:
+        raise ValueError(f"{backend} returned no masks")
+    rle, rle_encoder = _encode_segmentation_mask_rle(selected_mask)
+    score_value = _first_segmentation_score(scores)
+
+    return {
+        "rle": rle,
+        "rle_encoder": rle_encoder,
+        "score": score_value,
+        "prediction_source": f"{backend}-image-segmentation",
+        "backend": backend,
+        "image_path": image_path,
+    }
+
+
+def _select_first_mask(masks):
+    if masks is None:
+        return None
+    if hasattr(masks, "size") and masks.size == 0:
+        return None
+    if hasattr(masks, "ndim"):
+        return masks[0] if masks.ndim >= 3 else masks
+    if isinstance(masks, (list, tuple)):
+        if not masks:
+            return None
+        return masks[0]
+    return masks
+
+
+def _first_segmentation_score(scores):
+    try:
+        if hasattr(scores, "reshape"):
+            score_arr = scores.reshape(-1)
+            if getattr(score_arr, "size", 0):
+                return _clamp_score(float(score_arr[0]))
+        if isinstance(scores, (list, tuple)) and scores:
+            return _clamp_score(float(scores[0]))
+    except Exception:
+        pass
+    return 0.8
 
 
 def _image_segmentation(task, parsed, state):
@@ -691,9 +917,29 @@ def _image_segmentation(task, parsed, state):
     }
     label = (brush.get("labels") or ["Object"])[0]
     width, height = _image_dimensions(task)
-    rle, rle_encoder = _placeholder_segmentation_rle(width, height)
-    score_value = 0.65
     metadata = _load_image_segmentation_metadata() or {}
+    selected_backend = _selected_image_segmentation_backend(metadata)
+    backend_error = None
+
+    if selected_backend != "placeholder":
+        try:
+            backend_prediction = _predict_with_sam_image_backend(task, selected_backend, width, height)
+        except Exception as exc:
+            backend_error = str(exc)
+            backend_prediction = None
+    else:
+        backend_prediction = None
+
+    if backend_prediction:
+        rle = backend_prediction["rle"]
+        rle_encoder = backend_prediction["rle_encoder"]
+        score_value = backend_prediction["score"]
+        prediction_source = backend_prediction["prediction_source"]
+    else:
+        rle, rle_encoder = _placeholder_segmentation_rle(width, height)
+        score_value = 0.65
+        prediction_source = "placeholder-image-segmentation"
+
     model_version = (
         metadata.get("model_version")
         or state.get("image_segmentation", {}).get("model_version")
@@ -715,19 +961,36 @@ def _image_segmentation(task, parsed, state):
         },
     }
 
-    prediction_source = "placeholder-image-segmentation"
+    confidence = {
+        "prediction_source": prediction_source,
+        "confidence": score_value,
+        "confidence_bucket": _confidence_bucket(score_value),
+        "uncertain": False,
+        "rle_encoder": rle_encoder,
+    }
+    if backend_prediction:
+        confidence.update(
+            {
+                "backend": backend_prediction["backend"],
+                "image_path": backend_prediction["image_path"],
+                "prompt": "center_box",
+            }
+        )
+    elif selected_backend != "placeholder":
+        confidence.update(
+            {
+                "requested_backend": selected_backend,
+                "backend_error": backend_error or "backend did not return a mask",
+                "fallback": "placeholder",
+            }
+        )
+
     return {
         "model_version": model_version,
         "score": score_value,
         "result": [result],
         "prediction_source": prediction_source,
-        "confidence": {
-            "prediction_source": prediction_source,
-            "confidence": score_value,
-            "confidence_bucket": _confidence_bucket(score_value),
-            "uncertain": False,
-            "rle_encoder": rle_encoder,
-        },
+        "confidence": confidence,
     }
 
 

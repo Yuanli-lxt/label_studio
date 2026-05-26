@@ -94,6 +94,48 @@ Default output:
 demo_data/tasks/image_classification_review_tasks.json
 ```
 
+## Generate Expanded Demo Data
+
+The image demo dataset can be regenerated deterministically without external downloads:
+
+```bash
+scripts/generate_image_classification_demo_dataset.py
+```
+
+Default output:
+
+- `90` Product train images.
+- `90` Other train images.
+- `15` Product fixed-eval images.
+- `15` Other fixed-eval images.
+- `demo_data/tasks/image_classification_labeled_export.json`.
+- `demo_data/tasks/image_classification_eval_manifest.json`.
+- `demo_data/tasks/image_classification_regression_probes.json`.
+
+The generator uses a fixed seed and lightweight synthetic patterns. Product samples contain a crisp foreground object, while Other samples use textured backgrounds without a product-like center object. This keeps the demo small, reproducible, and easy to inspect.
+
+## Generate Non-Eval Review Tasks
+
+Eval-derived review tasks prove leakage protection. Non-eval review tasks prove that human corrections can enter the next retrain input.
+
+```bash
+scripts/create_non_eval_image_review_tasks.py
+```
+
+Default output:
+
+```text
+demo_data/tasks/image_classification_non_eval_review_tasks.json
+```
+
+The script reads the labeled export, filters out every filename in `image_classification_eval_manifest.json`, and writes a concise 3-5 task review pool. It prints:
+
+- total non-eval candidates.
+- eval-filtered count.
+- invalid skipped count.
+- final written task count.
+- output path.
+
 ## Import Review Tasks
 
 ```bash
@@ -106,6 +148,7 @@ Useful variants:
 scripts/import_image_review_tasks_to_label_studio.py --dry-run
 scripts/import_image_review_tasks_to_label_studio.py --project-id <project_id>
 scripts/import_image_review_tasks_to_label_studio.py --tasks-path demo_data/tasks/image_classification_review_tasks.json
+scripts/import_image_review_tasks_to_label_studio.py --tasks-path demo_data/tasks/image_classification_non_eval_review_tasks.json
 ```
 
 The import script validates `data.image`, skips invalid rows, lists existing project tasks, and dedupes by stable image key.
@@ -213,7 +256,8 @@ Last verified on 2026-05-16 with Label Studio `1.23.0` on Docker Desktop + WSL2:
 - ML backend `http://ml-backend:9090` connected successfully.
 - Webhook `http://host.docker.internal:9091/webhook/label-studio` was created/updated successfully.
 - Three image review tasks were imported, and a second import dry run skipped all three as duplicates.
-- A Label Studio UI annotation update produced one JSONL training candidate:
+- The expanded deterministic image dataset contains `180` train images and `30` fixed-eval images.
+- A Label Studio UI annotation update produced one eval JSONL training candidate:
 
 ```json
 {
@@ -225,7 +269,26 @@ Last verified on 2026-05-16 with Label Studio `1.23.0` on Docker Desktop + WSL2:
 }
 ```
 
-The verified candidate belongs to the fixed eval manifest. This is useful as a safety smoke test: the image gate reads the candidate, then reports `candidate_eval_leakage_skipped: 1` and `candidates used after eval filter: 0`, proving the candidate was not allowed into the training split.
+- A non-eval review candidate was also retained as a fixture:
+
+```json
+{
+  "task_id": "image-non-eval-review-002",
+  "project_id": 1,
+  "image": "/data/local-files/?d=images/demo_green.png",
+  "label": "Other",
+  "source": "label_studio_ui_non_eval_smoke"
+}
+```
+
+The eval candidate belongs to the fixed eval manifest and must be skipped. The non-eval candidate is allowed through the filter. The image gate should report:
+
+```text
+candidates used after eval filter: >= 1
+candidate eval leakage skipped: >= 1
+```
+
+This is the key portfolio story: first the Label Studio correction loop was built, then eval leakage was proven safe, then a non-eval review task proved that human correction candidates can enter retrain, and finally the gate locked the quality boundary.
 
 Validation commands that passed in this state:
 
@@ -233,6 +296,22 @@ Validation commands that passed in this state:
 python3 -m unittest discover -s tests -v
 scripts/run_image_classifier_validation_gate.sh
 scripts/run_text_classifier_validation_gate.sh
+```
+
+To reproduce the non-eval path manually:
+
+```bash
+scripts/generate_image_classification_demo_dataset.py
+scripts/create_non_eval_image_review_tasks.py
+scripts/import_image_review_tasks_to_label_studio.py --tasks-path demo_data/tasks/image_classification_non_eval_review_tasks.json
+```
+
+Then open Label Studio, annotate or update one non-eval review task, confirm `image_classification_training_candidates.jsonl` gains a non-eval row, and run:
+
+```bash
+scripts/trigger_image_classifier_retrain.sh
+scripts/inspect_image_classifier_metadata.sh
+scripts/run_image_classifier_validation_gate.sh
 ```
 
 ## Troubleshooting

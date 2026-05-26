@@ -61,6 +61,11 @@ services:
       TEXT_MODEL_ARTIFACTS_DIR: /model-state/text_classifier
       IMAGE_MODEL_ARTIFACTS_DIR: /model-state/image_classifier
       IMAGE_SEG_MODEL_ARTIFACTS_DIR: /model-state/image_segmentation
+      IMAGE_SEG_BACKEND: "${IMAGE_SEG_BACKEND:-placeholder}"
+      IMAGE_SEG_MODEL_TYPE: "${IMAGE_SEG_MODEL_TYPE:-vit_t}"
+      IMAGE_SEG_CHECKPOINT: "${IMAGE_SEG_CHECKPOINT:-}"
+      IMAGE_SEG_MODEL_ID: "${IMAGE_SEG_MODEL_ID:-facebook/sam2-hiera-large}"
+      IMAGE_SEG_DEVICE: "${IMAGE_SEG_DEVICE:-cpu}"
       IMAGE_LOCAL_FILES_ROOT: /demo-local-files
       TRAINER_URL: http://trainer:9091/train
       TRAINER_WEBHOOK_URL: http://trainer:9091/webhook/label-studio
