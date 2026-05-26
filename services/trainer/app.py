@@ -2904,6 +2904,13 @@ def _read_image_classifier_metadata():
     return None
 
 
+def _read_image_segmentation_metadata():
+    data = _read_json(_IMAGE_SEG_METADATA_PATH)
+    if isinstance(data, dict):
+        return data
+    return None
+
+
 class TrainerHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         route = self.path.rstrip("/") or "/"
@@ -2911,6 +2918,7 @@ class TrainerHandler(BaseHTTPRequestHandler):
             state = _load_state()
             text_metadata = _read_text_classifier_metadata()
             image_metadata = _read_image_classifier_metadata()
+            image_segmentation_metadata = _read_image_segmentation_metadata()
             _send_json(
                 self,
                 200,
@@ -2929,6 +2937,12 @@ class TrainerHandler(BaseHTTPRequestHandler):
                         "active": bool(image_metadata),
                         "metadata": image_metadata,
                         "metadata_path": _IMAGE_METADATA_PATH,
+                    },
+                    "image_segmentation": {
+                        "active": bool(image_segmentation_metadata),
+                        "metadata": image_segmentation_metadata,
+                        "metadata_path": _IMAGE_SEG_METADATA_PATH,
+                        "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
                     },
                 },
             )
@@ -2950,6 +2964,14 @@ class TrainerHandler(BaseHTTPRequestHandler):
             metadata = _read_image_classifier_metadata()
             if not metadata:
                 _send_json(self, 404, {"detail": "no trained image classification model"})
+                return
+            _send_json(self, 200, metadata)
+            return
+
+        if route in ("/models/image-segmentation", "/models/image-segmentation/current"):
+            metadata = _read_image_segmentation_metadata()
+            if not metadata:
+                _send_json(self, 404, {"detail": "no trained image segmentation model"})
                 return
             _send_json(self, 200, metadata)
             return

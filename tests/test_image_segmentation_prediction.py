@@ -158,6 +158,33 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual("fallback-minimal", prediction["confidence"]["rle_encoder"])
             self.assertEqual("rle", prediction["result"][0]["value"]["format"])
 
+    def test_prediction_uses_trained_segmentation_metadata_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            artifacts = tmp_dir / "image_segmentation"
+            artifacts.mkdir(parents=True)
+            (artifacts / "metadata.json").write_text(
+                json.dumps({"model_version": "image-seg-v0042", "task_type": "image_segmentation"}),
+                encoding="utf-8",
+            )
+            backend = self._backend(tmp_dir)
+            config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+
+            response = backend._predict(
+                {
+                    "label_config": config,
+                    "tasks": [
+                        {
+                            "id": "seg-trained",
+                            "data": {"image": "/data/local-files/?d=images/demo_blue.png"},
+                        }
+                    ],
+                }
+            )
+
+            self.assertEqual("image-seg-v0042", response["model_version"])
+            self.assertEqual("image-seg-v0042", response["results"][0]["model_version"])
+
 
 if __name__ == "__main__":
     unittest.main()

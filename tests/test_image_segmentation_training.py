@@ -357,6 +357,20 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
                 module._train_route_task_type("/retrain/image-segmentation"),
             )
 
+    def test_read_image_segmentation_metadata_returns_dict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = self._module(Path(tmp))
+            Path(module._IMAGE_SEG_METADATA_PATH).parent.mkdir(parents=True, exist_ok=True)
+            Path(module._IMAGE_SEG_METADATA_PATH).write_text(
+                json.dumps({"task_type": "image_segmentation", "model_version": "image-seg-v0009"}),
+                encoding="utf-8",
+            )
+
+            metadata = module._read_image_segmentation_metadata()
+
+            self.assertEqual("image_segmentation", metadata["task_type"])
+            self.assertEqual("image-seg-v0009", metadata["model_version"])
+
 
 if __name__ == "__main__":
     unittest.main()

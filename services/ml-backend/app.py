@@ -45,7 +45,7 @@ _TEXT_VECTORIZER_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "vectorizer.jobli
 _TEXT_METADATA_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "metadata.json")
 _IMAGE_CLASSIFIER_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "classifier.joblib")
 _IMAGE_METADATA_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "metadata.json")
-_IMAGE_SEG_ARTIFACT_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "segmenter.joblib")
+_IMAGE_SEG_ARTIFACT_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "placeholder_model.json")
 _IMAGE_SEG_METADATA_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "metadata.json")
 
 _TEXT_MODEL_LOCK = threading.Lock()
@@ -234,6 +234,11 @@ def _load_image_classifier_bundle():
         _IMAGE_MODEL_CACHE["fingerprint"] = fingerprint
         _IMAGE_MODEL_CACHE["bundle"] = bundle
         return bundle
+
+
+def _load_image_segmentation_metadata():
+    metadata = _load_json(_IMAGE_SEG_METADATA_PATH)
+    return metadata if isinstance(metadata, dict) else None
 
 
 def _local_tag(tag):
@@ -688,8 +693,10 @@ def _image_segmentation(task, parsed, state):
     width, height = _image_dimensions(task)
     rle, rle_encoder = _placeholder_segmentation_rle(width, height)
     score_value = 0.65
+    metadata = _load_image_segmentation_metadata() or {}
     model_version = (
-        state.get("image_segmentation", {}).get("model_version")
+        metadata.get("model_version")
+        or state.get("image_segmentation", {}).get("model_version")
         or state["model_version"]
     )
 
@@ -1035,6 +1042,7 @@ class BackendHandler(BaseHTTPRequestHandler):
             image_bundle = _load_image_classifier_bundle()
             text_metadata = text_bundle["metadata"] if text_bundle else _load_json(_TEXT_METADATA_PATH)
             image_metadata = image_bundle["metadata"] if image_bundle else _load_json(_IMAGE_METADATA_PATH)
+            image_segmentation_metadata = _load_image_segmentation_metadata()
             _send_json(
                 self,
                 200,
@@ -1062,6 +1070,12 @@ class BackendHandler(BaseHTTPRequestHandler):
                             "confidence_threshold": IMAGE_CLS_UNCERTAIN_THRESHOLD,
                         },
                     },
+                    "image_segmentation": {
+                        "active": bool(image_segmentation_metadata),
+                        "metadata": image_segmentation_metadata,
+                        "metadata_path": _IMAGE_SEG_METADATA_PATH,
+                        "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
+                    },
                 },
             )
             return
@@ -1082,6 +1096,14 @@ class BackendHandler(BaseHTTPRequestHandler):
             metadata = _load_json(_IMAGE_METADATA_PATH)
             if not isinstance(metadata, dict):
                 _send_json(self, 404, {"detail": "no trained image classification model"})
+                return
+            _send_json(self, 200, metadata)
+            return
+
+        if route in ("/models/image-segmentation", "/models/image-segmentation/current"):
+            metadata = _load_image_segmentation_metadata()
+            if not isinstance(metadata, dict):
+                _send_json(self, 404, {"detail": "no trained image segmentation model"})
                 return
             _send_json(self, 200, metadata)
             return
