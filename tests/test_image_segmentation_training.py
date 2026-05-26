@@ -210,6 +210,82 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
             self.assertEqual([3, 2], [sample["annotation_id"] for sample in deduped])
             self.assertEqual([[3], [2]], [sample["rle"] for sample in deduped])
 
+    def test_segmentation_candidate_reader_accepts_image_path_only_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            module = self._module(tmp_dir)
+            valid_path = str(ROOT / "demo_data" / "local-files" / "images" / "demo_blue.png")
+            row = {
+                "image_path": valid_path,
+                "label": "Object",
+                "rle": [0, 1, 2, 3],
+                "original_width": 320,
+                "original_height": 240,
+                "task_id": 42,
+                "annotation_id": 43,
+                "project_id": 44,
+                "source": "test",
+                "updated_at": "2026-05-21T09:00:00Z",
+            }
+            Path(module.IMAGE_SEG_TRAINING_CANDIDATES_PATH).write_text(
+                json.dumps(row) + "\n",
+                encoding="utf-8",
+            )
+
+            samples, stats = module._read_image_segmentation_training_candidate_samples()
+
+            self.assertEqual({"total": 1, "used": 1, "skipped": 0, "errors": []}, stats)
+            self.assertEqual(1, len(samples))
+            self.assertEqual(valid_path, samples[0]["image"])
+            self.assertEqual(valid_path, samples[0]["image_path"])
+            self.assertEqual("Object", samples[0]["label"])
+
+    def test_segmentation_export_parser_accepts_data_image_path_only_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            module = self._module(tmp_dir)
+            valid_path = str(ROOT / "demo_data" / "local-files" / "images" / "demo_blue.png")
+            export_path = tmp_dir / "export.json"
+            export_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": 45,
+                            "project": 46,
+                            "data": {"image_path": valid_path, "dataset_split": "eval"},
+                            "annotations": [
+                                {
+                                    "id": 47,
+                                    "was_cancelled": False,
+                                    "updated_at": "2026-05-21T09:00:00Z",
+                                    "result": [
+                                        {
+                                            "type": "brushlabels",
+                                            "original_width": 320,
+                                            "original_height": 240,
+                                            "value": {
+                                                "format": "rle",
+                                                "rle": [0, 1, 2, 3],
+                                                "brushlabels": ["Object"],
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            samples = module._read_image_segmentation_samples_from_export(str(export_path))
+
+            self.assertEqual(1, len(samples))
+            self.assertEqual(valid_path, samples[0]["image"])
+            self.assertEqual(valid_path, samples[0]["image_path"])
+            self.assertEqual("eval", samples[0]["dataset_split"])
+            self.assertEqual("Object", samples[0]["label"])
+
     def test_train_placeholder_segmentation_rejects_invalid_rle_and_dimensions(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)

@@ -881,7 +881,7 @@ def _read_image_segmentation_training_candidate_samples():
                     skipped += 1
                     continue
 
-                image_ref = row.get("image")
+                image_ref = row.get("image") if row.get("image") is not None else row.get("image_path")
                 image_path = _resolve_image_file_path(image_ref)
                 if not image_path:
                     errors.append(f"line {line_no}: cannot resolve image path for {image_ref}")
@@ -1422,7 +1422,7 @@ def _parse_image_segmentation_export_task(task):
 
     data = task.get("data") if isinstance(task.get("data"), dict) else {}
     meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
-    image_ref = data.get("image") or meta.get("image")
+    image_ref = data.get("image") or data.get("image_path") or meta.get("image") or meta.get("image_path")
     image_path = _resolve_image_file_path(image_ref)
     if not image_path:
         return []
