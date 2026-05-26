@@ -1,0 +1,20 @@
+[
+  {
+    "id": "seg-review-001",
+    "data": {
+      "image": "/data/local-files/?d=images/demo_blue.png"
+    },
+    "meta": {
+      "review_type": "image_segmentation_smoke"
+    }
+  },
+  {
+    "id": "seg-review-002",
+    "data": {
+      "image": "/data/local-files/?d=images/demo_product_red.png"
+    },
+    "meta": {
+      "review_type": "image_segmentation_smoke"
+    }
+  }
+]
