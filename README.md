@@ -246,6 +246,44 @@ Trainer/ML model metadata endpoints:
 - `http://localhost:9091/models/image-classification/current`
 - `http://localhost:9090/models/image-classification/current`
 
+## Image Segmentation HITL (Placeholder Model)
+
+Image segmentation has a first-version Brush/mask human-review loop. It uses a single foreground label, `Object`, and a deterministic placeholder model so the Label Studio -> prediction -> human correction -> webhook -> training data -> retrain -> new pre-label contract is testable before a real segmentation model is plugged in.
+
+Label config:
+- `label_configs/image_segmentation.xml`
+
+Artifact location:
+- `demo_data/model_state/image_segmentation/metadata.json`
+- `demo_data/model_state/image_segmentation/placeholder_model.json`
+- `demo_data/model_state/image_segmentation/last_training_dataset.jsonl`
+
+Bootstrap/import a segmentation review project:
+
+```bash
+export LABEL_STUDIO_URL=http://localhost:18080
+export LABEL_STUDIO_API_TOKEN='<your-token>'
+scripts/bootstrap_label_studio_image_segmentation_review.py
+scripts/import_image_segmentation_review_tasks_to_label_studio.py
+```
+
+Trigger and inspect placeholder retrain:
+
+```bash
+scripts/trigger_image_segmentation_retrain.sh
+scripts/inspect_image_segmentation_metadata.sh
+```
+
+Run the deterministic segmentation gate:
+
+```bash
+scripts/run_image_segmentation_validation_gate.sh
+```
+
+Segmentation metadata endpoints:
+- `http://localhost:9091/models/image-segmentation/current`
+- `http://localhost:9090/models/image-segmentation/current`
+
 ## How To Read Metadata
 
 Inspect full metadata:

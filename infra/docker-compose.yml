@@ -60,6 +60,7 @@ services:
       MODEL_ARTIFACTS_DIR: /model-state/text_classifier
       TEXT_MODEL_ARTIFACTS_DIR: /model-state/text_classifier
       IMAGE_MODEL_ARTIFACTS_DIR: /model-state/image_classifier
+      IMAGE_SEG_MODEL_ARTIFACTS_DIR: /model-state/image_segmentation
       IMAGE_LOCAL_FILES_ROOT: /demo-local-files
       TRAINER_URL: http://trainer:9091/train
       TRAINER_WEBHOOK_URL: http://trainer:9091/webhook/label-studio
@@ -97,6 +98,7 @@ services:
       MODEL_ARTIFACTS_DIR: /model-state/text_classifier
       TEXT_MODEL_ARTIFACTS_DIR: /model-state/text_classifier
       IMAGE_MODEL_ARTIFACTS_DIR: /model-state/image_classifier
+      IMAGE_SEG_MODEL_ARTIFACTS_DIR: /model-state/image_segmentation
       IMAGE_LOCAL_FILES_ROOT: /demo-local-files
       TRAINING_DATASET_EVENTS_PATH: /model-state/text_classifier/training_dataset_events.jsonl
       TRAINING_EVENT_LOG_PATH: /model-state/training_events.jsonl
@@ -114,6 +116,7 @@ services:
       IMAGE_CLS_UNCERTAIN_THRESHOLD: "${IMAGE_CLS_UNCERTAIN_THRESHOLD:-0.60}"
       IMAGE_CLS_EVAL_MANIFEST_PATH: "${IMAGE_CLS_EVAL_MANIFEST_PATH:-/demo-tasks/image_classification_eval_manifest.json}"
       IMAGE_TRAINING_CANDIDATES_PATH: "${IMAGE_TRAINING_CANDIDATES_PATH:-/demo-tasks/image_classification_training_candidates.jsonl}"
+      IMAGE_SEG_TRAINING_CANDIDATES_PATH: "${IMAGE_SEG_TRAINING_CANDIDATES_PATH:-/demo-tasks/image_segmentation_training_candidates.jsonl}"
       LABEL_STUDIO_URL: "${LABEL_STUDIO_URL:-http://label-studio:8080}"
       LABEL_STUDIO_API_TOKEN: "${LABEL_STUDIO_API_TOKEN:-}"
       LABEL_STUDIO_TIMEOUT_SECONDS: "${LABEL_STUDIO_TIMEOUT_SECONDS:-5.0}"

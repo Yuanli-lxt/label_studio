@@ -31,6 +31,10 @@ TEXT_MODEL_ARTIFACTS_DIR = os.getenv(
     os.getenv("MODEL_ARTIFACTS_DIR", "/model-state/text_classifier"),
 )
 IMAGE_MODEL_ARTIFACTS_DIR = os.getenv("IMAGE_MODEL_ARTIFACTS_DIR", "/model-state/image_classifier")
+IMAGE_SEG_MODEL_ARTIFACTS_DIR = os.getenv(
+    "IMAGE_SEG_MODEL_ARTIFACTS_DIR",
+    "/model-state/image_segmentation",
+)
 TRAINING_DATASET_EVENTS_PATH = os.getenv(
     "TRAINING_DATASET_EVENTS_PATH",
     "/model-state/text_classifier/training_dataset_events.jsonl",
@@ -58,6 +62,10 @@ IMAGE_TRAINING_CANDIDATES_PATH = os.getenv(
     "IMAGE_TRAINING_CANDIDATES_PATH",
     "/demo-tasks/image_classification_training_candidates.jsonl",
 )
+IMAGE_SEG_TRAINING_CANDIDATES_PATH = os.getenv(
+    "IMAGE_SEG_TRAINING_CANDIDATES_PATH",
+    "/demo-tasks/image_segmentation_training_candidates.jsonl",
+)
 LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "http://label-studio:8080")
 LABEL_STUDIO_API_TOKEN = os.getenv("LABEL_STUDIO_API_TOKEN", "")
 LABEL_STUDIO_TIMEOUT_SECONDS = float(os.getenv("LABEL_STUDIO_TIMEOUT_SECONDS", "5.0"))
@@ -71,6 +79,12 @@ _TEXT_LAST_DATASET_PATH = os.path.join(TEXT_MODEL_ARTIFACTS_DIR, "last_training_
 _IMAGE_CLASSIFIER_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "classifier.joblib")
 _IMAGE_METADATA_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "metadata.json")
 _IMAGE_LAST_DATASET_PATH = os.path.join(IMAGE_MODEL_ARTIFACTS_DIR, "last_training_dataset.jsonl")
+_IMAGE_SEG_ARTIFACT_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "placeholder_model.json")
+_IMAGE_SEG_METADATA_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "metadata.json")
+_IMAGE_SEG_LAST_DATASET_PATH = os.path.join(
+    IMAGE_SEG_MODEL_ARTIFACTS_DIR,
+    "last_training_dataset.jsonl",
+)
 
 # Backward-compatible aliases retained for existing tests/scripts.
 MODEL_ARTIFACTS_DIR = TEXT_MODEL_ARTIFACTS_DIR
@@ -103,6 +117,13 @@ def _default_state():
             "model_version": None,
             "trained_at": None,
             "metadata_path": _IMAGE_METADATA_PATH,
+        },
+        "image_segmentation": {
+            "active": False,
+            "model_version": None,
+            "trained_at": None,
+            "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
+            "metadata_path": _IMAGE_SEG_METADATA_PATH,
         },
         "behavior": {
             "image_positive_tokens": ["blue", "product", "object", "demo_blue"],
@@ -174,6 +195,8 @@ def _load_state():
         state["text_classifier"].update(loaded["text_classifier"])
     if isinstance(loaded.get("image_classifier"), dict):
         state["image_classifier"].update(loaded["image_classifier"])
+    if isinstance(loaded.get("image_segmentation"), dict):
+        state["image_segmentation"].update(loaded["image_segmentation"])
     return state
 
 
@@ -556,6 +579,67 @@ def _normalize_image_classification_label(value):
     return None
 
 
+def _normalize_image_segmentation_label(value):
+    label = _normalize_label(value)
+    if not label:
+        return None
+    if label.lower() == "object":
+        return "Object"
+    return None
+
+
+def _positive_int(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _extract_brush_mask_result(result_items):
+    if not isinstance(result_items, list):
+        return None
+    for item in result_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "brushlabels":
+            continue
+        value = item.get("value")
+        if not isinstance(value, dict):
+            continue
+        if str(value.get("format") or "").strip().lower() != "rle":
+            continue
+
+        rle = value.get("rle")
+        if not isinstance(rle, list) or not rle:
+            continue
+
+        labels = value.get("brushlabels")
+        if not isinstance(labels, list):
+            continue
+
+        label = None
+        for raw_label in labels:
+            label = _normalize_image_segmentation_label(raw_label)
+            if label:
+                break
+        if label is None:
+            continue
+
+        original_width = _positive_int(item.get("original_width"))
+        original_height = _positive_int(item.get("original_height"))
+        if original_width is None or original_height is None:
+            continue
+
+        return {
+            "label": label,
+            "rle": rle,
+            "original_width": original_width,
+            "original_height": original_height,
+        }
+    return None
+
+
 def _parse_image_classification_sample_from_full_task(task, fallback_project_id=None):
     if not isinstance(task, dict):
         raise ValueError("Label Studio task payload is not an object")
@@ -614,6 +698,66 @@ def _parse_image_classification_sample_from_full_task(task, fallback_project_id=
     }
 
 
+def _parse_image_segmentation_sample_from_full_task(task, fallback_project_id=None):
+    if not isinstance(task, dict):
+        raise ValueError("Label Studio task payload is not an object")
+
+    task_id = task.get("id")
+    try:
+        task_id = int(task_id)
+    except (TypeError, ValueError):
+        raise ValueError("Label Studio task payload missing valid task id")
+
+    project_id = _normalize_project_id(task.get("project"))
+    if project_id is None:
+        project_id = _normalize_project_id(fallback_project_id)
+
+    data = task.get("data")
+    data = data if isinstance(data, dict) else {}
+    image = data.get("image")
+    if image is None:
+        raise ValueError(f"Label Studio task {task_id} has no `data.image` field")
+
+    annotations = task.get("annotations")
+    if not isinstance(annotations, list) or not annotations:
+        raise ValueError(f"Label Studio task {task_id} has no annotations")
+
+    selected = None
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        if annotation.get("was_cancelled"):
+            continue
+        mask = _extract_brush_mask_result(annotation.get("result", []))
+        if mask is None:
+            continue
+        updated_at = _normalize_text(annotation.get("updated_at") or annotation.get("created_at"))
+        selected = {
+            "annotation_id": annotation.get("id"),
+            "updated_at": updated_at,
+            **mask,
+        }
+
+    if selected is None:
+        raise ValueError(
+            f"Label Studio task {task_id} has no non-cancelled image segmentation annotation "
+            "with Object BrushLabels RLE mask"
+        )
+
+    return {
+        "task_id": task_id,
+        "project_id": project_id,
+        "image": image,
+        "label": selected["label"],
+        "rle": selected["rle"],
+        "original_width": selected["original_width"],
+        "original_height": selected["original_height"],
+        "source": "label_studio_webhook_task_fetch",
+        "annotation_id": selected["annotation_id"],
+        "updated_at": selected["updated_at"] or _utc_now_iso(),
+    }
+
+
 def _append_image_training_candidate(candidate):
     required_fields = ["task_id", "project_id", "image", "label", "source", "annotation_id", "updated_at"]
     for field in required_fields:
@@ -622,6 +766,28 @@ def _append_image_training_candidate(candidate):
 
     _ensure_parent(IMAGE_TRAINING_CANDIDATES_PATH)
     with open(IMAGE_TRAINING_CANDIDATES_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(candidate, ensure_ascii=False) + "\n")
+
+
+def _append_image_segmentation_training_candidate(candidate):
+    required_fields = [
+        "task_id",
+        "project_id",
+        "image",
+        "label",
+        "rle",
+        "original_width",
+        "original_height",
+        "source",
+        "annotation_id",
+        "updated_at",
+    ]
+    for field in required_fields:
+        if candidate.get(field) is None:
+            raise ValueError(f"image segmentation training candidate missing required field: {field}")
+
+    _ensure_parent(IMAGE_SEG_TRAINING_CANDIDATES_PATH)
+    with open(IMAGE_SEG_TRAINING_CANDIDATES_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(candidate, ensure_ascii=False) + "\n")
 
 
@@ -688,6 +854,81 @@ def _read_image_training_candidate_samples():
     return samples, {"total": total, "used": used, "skipped": skipped, "errors": errors}
 
 
+def _read_image_segmentation_training_candidate_samples():
+    if not os.path.exists(IMAGE_SEG_TRAINING_CANDIDATES_PATH):
+        return [], {"total": 0, "used": 0, "skipped": 0, "errors": []}
+
+    samples = []
+    errors = []
+    total = 0
+    used = 0
+    skipped = 0
+    try:
+        with open(IMAGE_SEG_TRAINING_CANDIDATES_PATH, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                content = line.strip()
+                if not content:
+                    continue
+                total += 1
+                try:
+                    row = json.loads(content)
+                except json.JSONDecodeError:
+                    errors.append(f"line {line_no}: invalid JSON")
+                    skipped += 1
+                    continue
+                if not isinstance(row, dict):
+                    errors.append(f"line {line_no}: candidate row is not an object")
+                    skipped += 1
+                    continue
+
+                image_ref = row.get("image") if row.get("image") is not None else row.get("image_path")
+                image_path = _resolve_image_file_path(image_ref)
+                if not image_path:
+                    errors.append(f"line {line_no}: cannot resolve image path for {image_ref}")
+                    skipped += 1
+                    continue
+
+                label = _normalize_image_segmentation_label(row.get("label"))
+                if label is None:
+                    errors.append(f"line {line_no}: unsupported label {row.get('label')}, expected Object")
+                    skipped += 1
+                    continue
+
+                rle = row.get("rle")
+                if not isinstance(rle, list) or not rle:
+                    errors.append(f"line {line_no}: missing non-empty RLE mask")
+                    skipped += 1
+                    continue
+
+                original_width = _positive_int(row.get("original_width"))
+                original_height = _positive_int(row.get("original_height"))
+                if original_width is None or original_height is None:
+                    errors.append(f"line {line_no}: missing positive original dimensions")
+                    skipped += 1
+                    continue
+
+                sample = {
+                    "image": image_ref,
+                    "image_path": image_path,
+                    "label": label,
+                    "rle": rle,
+                    "original_width": original_width,
+                    "original_height": original_height,
+                    "dataset_split": "train",
+                    "task_id": row.get("task_id"),
+                    "annotation_id": row.get("annotation_id"),
+                    "project_id": row.get("project_id"),
+                    "updated_at": row.get("updated_at"),
+                    "source": row.get("source") or "training_candidate",
+                }
+                samples.append(sample)
+                used += 1
+    except OSError as exc:
+        errors.append(f"failed to read candidates file: {exc}")
+
+    return samples, {"total": total, "used": used, "skipped": skipped, "errors": errors}
+
+
 def _maybe_record_image_candidate_from_webhook(payload):
     task_id = _extract_webhook_task_id(payload)
     project_id = _extract_webhook_project_id(payload)
@@ -697,6 +938,18 @@ def _maybe_record_image_candidate_from_webhook(payload):
     full_task = _fetch_label_studio_task(task_id, project_id)
     candidate = _parse_image_classification_sample_from_full_task(full_task, project_id)
     _append_image_training_candidate(candidate)
+    return candidate, None
+
+
+def _maybe_record_image_segmentation_candidate_from_webhook(payload):
+    task_id = _extract_webhook_task_id(payload)
+    project_id = _extract_webhook_project_id(payload)
+    if task_id is None:
+        return None, "image segmentation webhook candidate ingest skipped: task_id not found in payload"
+
+    full_task = _fetch_label_studio_task(task_id, project_id)
+    candidate = _parse_image_segmentation_sample_from_full_task(full_task, project_id)
+    _append_image_segmentation_training_candidate(candidate)
     return candidate, None
 
 
@@ -1120,6 +1373,149 @@ def _build_image_classification_dataset(payload):
     return samples, context
 
 
+def _normalize_manual_image_segmentation_samples(samples):
+    normalized = []
+    if not isinstance(samples, list):
+        return normalized
+
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+
+        image_ref = sample.get("image")
+        image_path = _resolve_image_file_path(image_ref)
+        if not image_path and sample.get("image_path") is not None:
+            image_ref = sample.get("image_path")
+            image_path = _resolve_image_file_path(image_ref)
+        label = _normalize_image_segmentation_label(sample.get("label"))
+        rle = sample.get("rle")
+        original_width = _positive_int(sample.get("original_width"))
+        original_height = _positive_int(sample.get("original_height"))
+        dataset_split = _normalize_dataset_split(sample.get("dataset_split") or sample.get("split"))
+        if not image_path or label is None or not isinstance(rle, list) or not rle:
+            continue
+        if original_width is None or original_height is None:
+            continue
+
+        normalized.append(
+            {
+                "image": image_ref,
+                "image_path": image_path,
+                "label": label,
+                "rle": rle,
+                "original_width": original_width,
+                "original_height": original_height,
+                "dataset_split": dataset_split,
+                "task_id": sample.get("task_id"),
+                "annotation_id": sample.get("annotation_id"),
+                "project_id": sample.get("project_id"),
+                "updated_at": sample.get("updated_at"),
+                "source": sample.get("source") or "manual",
+            }
+        )
+    return normalized
+
+
+def _parse_image_segmentation_export_task(task):
+    if not isinstance(task, dict):
+        return []
+
+    data = task.get("data") if isinstance(task.get("data"), dict) else {}
+    meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
+    image_ref = data.get("image") or data.get("image_path") or meta.get("image") or meta.get("image_path")
+    image_path = _resolve_image_file_path(image_ref)
+    if not image_path:
+        return []
+    dataset_split = _normalize_dataset_split(
+        meta.get("dataset_split") or meta.get("split") or data.get("dataset_split") or data.get("split")
+    )
+
+    annotations = task.get("annotations")
+    if not isinstance(annotations, list):
+        return []
+
+    samples = []
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        if annotation.get("was_cancelled"):
+            continue
+        mask = _extract_brush_mask_result(annotation.get("result", []))
+        if mask is None:
+            continue
+        samples.append(
+            {
+                "image": image_ref,
+                "image_path": image_path,
+                "task_id": task.get("id"),
+                "project_id": _normalize_project_id(task.get("project")),
+                "annotation_id": annotation.get("id"),
+                "updated_at": _normalize_text(annotation.get("updated_at") or annotation.get("created_at")),
+                "dataset_split": dataset_split,
+                "source": "label_studio_export",
+                **mask,
+            }
+        )
+    return samples
+
+
+def _read_image_segmentation_samples_from_export(path):
+    data = _read_json(path)
+    if not isinstance(data, list):
+        return []
+
+    samples = []
+    for task in data:
+        samples.extend(_parse_image_segmentation_export_task(task))
+    return samples
+
+
+def _dedupe_image_segmentation_samples(samples):
+    deduped = {}
+    order = []
+    for sample in samples:
+        dedupe_key = (
+            sample.get("image_path", ""),
+            sample.get("label", ""),
+            sample.get("dataset_split") or "train",
+        )
+        if dedupe_key not in deduped:
+            order.append(dedupe_key)
+        deduped[dedupe_key] = sample
+    return [deduped[key] for key in order]
+
+
+def _build_image_segmentation_dataset(payload):
+    request_payload = payload if isinstance(payload, dict) else {}
+    dataset_path = _resolve_dataset_path(request_payload)
+
+    samples = []
+    samples.extend(_normalize_manual_image_segmentation_samples(request_payload.get("samples")))
+
+    nested_payload = (
+        request_payload.get("payload")
+        if isinstance(request_payload.get("payload"), dict)
+        else None
+    )
+    if nested_payload:
+        samples.extend(_normalize_manual_image_segmentation_samples(nested_payload.get("samples")))
+
+    if dataset_path:
+        samples.extend(_read_image_segmentation_samples_from_export(dataset_path))
+
+    candidate_samples, candidate_stats = _read_image_segmentation_training_candidate_samples()
+    samples.extend(candidate_samples)
+    samples = _dedupe_image_segmentation_samples(samples)
+
+    context = {
+        "dataset_path": dataset_path,
+        "local_files_root": IMAGE_LOCAL_FILES_ROOT,
+        "candidates_path": IMAGE_SEG_TRAINING_CANDIDATES_PATH,
+        "candidate_stats": candidate_stats,
+    }
+    return samples, context
+
+
 def _build_text_classification_dataset(payload, webhook_sample):
     request_payload = payload if isinstance(payload, dict) else {}
     dataset_path = _resolve_dataset_path(request_payload)
@@ -1281,6 +1677,68 @@ def _image_dataset_quality_report(samples):
                 "min_total_samples": IMAGE_CLS_MIN_TOTAL_SAMPLES,
                 "min_per_class_samples": IMAGE_CLS_MIN_PER_CLASS_SAMPLES,
                 "max_imbalance_ratio": IMAGE_CLS_MAX_IMBALANCE_RATIO,
+            },
+        },
+    }
+
+
+def _image_segmentation_dataset_quality_report(samples):
+    labels = [sample["label"] for sample in samples]
+    label_counts = Counter(labels)
+    total = len(samples)
+    unique_images = len({sample["image_path"] for sample in samples})
+    distribution = {label: label_counts[label] for label in sorted(label_counts.keys())}
+    dimensions = [
+        (sample.get("original_width"), sample.get("original_height"))
+        for sample in samples
+        if sample.get("original_width") and sample.get("original_height")
+    ]
+    unique_dimensions = sorted({f"{width}x{height}" for width, height in dimensions})
+
+    errors = []
+    if total < 1:
+        errors.append("need at least 1 sample for image segmentation training")
+    unsupported = sorted(label for label in distribution if label != "Object")
+    if unsupported:
+        errors.append(f"unsupported segmentation labels: {unsupported}; expected Object")
+    invalid_rle = [
+        idx + 1
+        for idx, sample in enumerate(samples)
+        if not isinstance(sample.get("rle"), list) or not sample.get("rle")
+    ]
+    if invalid_rle:
+        errors.append(f"segmentation samples missing non-empty rle: rows {invalid_rle}")
+    invalid_dimensions = [
+        idx + 1
+        for idx, sample in enumerate(samples)
+        if _positive_int(sample.get("original_width")) is None
+        or _positive_int(sample.get("original_height")) is None
+    ]
+    if invalid_dimensions:
+        errors.append(
+            "segmentation samples missing positive original dimensions: "
+            f"rows {invalid_dimensions}"
+        )
+
+    return {
+        "total_samples": total,
+        "unique_image_samples": unique_images,
+        "class_count": len(distribution),
+        "label_distribution": distribution,
+        "mask_dimensions": {
+            "unique": unique_dimensions,
+            "count": len(unique_dimensions),
+            "min_width": min((width for width, _ in dimensions), default=0),
+            "max_width": max((width for width, _ in dimensions), default=0),
+            "min_height": min((height for _, height in dimensions), default=0),
+            "max_height": max((height for _, height in dimensions), default=0),
+        },
+        "validation": {
+            "passed": len(errors) == 0,
+            "errors": errors,
+            "rules": {
+                "min_total_samples": 1,
+                "allowed_labels": ["Object"],
             },
         },
     }
@@ -1975,6 +2433,84 @@ def _train_real_image_classifier(samples, training_run, dataset_context=None):
     return metadata
 
 
+def _train_placeholder_image_segmentation(samples, training_run, dataset_context=None):
+    context = dataset_context if isinstance(dataset_context, dict) else {}
+    quality = _image_segmentation_dataset_quality_report(samples)
+    if not quality["validation"]["passed"]:
+        raise ValueError("; ".join(quality["validation"]["errors"]))
+
+    model_version = f"image-seg-v{training_run:04d}"
+    run_id = f"train-{training_run:04d}"
+    trained_at = _utc_now_iso()
+
+    os.makedirs(IMAGE_SEG_MODEL_ARTIFACTS_DIR, exist_ok=True)
+    with open(_IMAGE_SEG_LAST_DATASET_PATH, "w", encoding="utf-8") as dataset_file:
+        for sample in samples:
+            dataset_file.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    artifact = {
+        "model_version": model_version,
+        "task_type": "image_segmentation",
+        "labels": ["Object"],
+        "strategy": "placeholder_center_mask",
+        "rle_format": "label_studio_brush",
+        "trained_at": trained_at,
+    }
+    with open(_IMAGE_SEG_ARTIFACT_PATH, "w", encoding="utf-8") as f:
+        json.dump(artifact, f, indent=2)
+
+    metadata = {
+        "model_version": model_version,
+        "training_run": training_run,
+        "training_run_id": run_id,
+        "trained_at": trained_at,
+        "task_type": "image_segmentation",
+        "labels": ["Object"],
+        "dataset": {
+            "train_size": len(samples),
+            "eval_size": 0,
+            "total_size": len(samples),
+            "source": "label_studio_brush_masks",
+            "source_path": context.get("dataset_path"),
+            "local_files_root": context.get("local_files_root"),
+            "snapshot_path": _IMAGE_SEG_LAST_DATASET_PATH,
+            "quality": quality,
+            "candidates": {
+                "path": context.get("candidates_path"),
+                "stats": context.get("candidate_stats"),
+            },
+        },
+        "metrics": {
+            "evaluation_scope": "not_applicable_placeholder",
+            "mask_count": len(samples),
+        },
+        "model_details": {
+            "name": "placeholder_center_mask",
+            "rle_format": "label_studio_brush",
+            "replaceable_with": [
+                "SAM",
+                "YOLO-seg",
+                "Detectron2",
+                "custom",
+            ],
+        },
+        "artifacts": {
+            "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
+            "metadata_path": _IMAGE_SEG_METADATA_PATH,
+            "placeholder_model_path": _IMAGE_SEG_ARTIFACT_PATH,
+        },
+        "framework": {
+            "library": "none",
+            "estimator": "placeholder",
+        },
+    }
+
+    with open(_IMAGE_SEG_METADATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    return metadata
+
+
 def _run_deterministic_fallback(payload, trigger, train_error=None):
     current = _load_state()
     previous_run = int(current.get("training_run", 0))
@@ -1999,6 +2535,7 @@ def _run_deterministic_fallback(payload, trigger, train_error=None):
         "behavior": _behavior_for_run(training_run),
         "text_classifier": current.get("text_classifier", _default_state()["text_classifier"]),
         "image_classifier": current.get("image_classifier", _default_state()["image_classifier"]),
+        "image_segmentation": current.get("image_segmentation", _default_state()["image_segmentation"]),
         "last_training_event": train_record,
     }
 
@@ -2073,6 +2610,7 @@ def _run_text_training(payload, trigger):
                 },
             },
             "image_classifier": current.get("image_classifier", _default_state()["image_classifier"]),
+            "image_segmentation": current.get("image_segmentation", _default_state()["image_segmentation"]),
             "last_training_event": train_record,
         }
 
@@ -2163,6 +2701,7 @@ def _run_image_training(payload, trigger):
                     "label_distribution": metadata["dataset"]["quality"]["label_distribution"],
                 },
             },
+            "image_segmentation": current.get("image_segmentation", _default_state()["image_segmentation"]),
             "last_training_event": train_record,
         }
 
@@ -2181,11 +2720,104 @@ def _run_image_training(payload, trigger):
         }
 
 
+def _run_image_segmentation_training(payload, trigger):
+    with _STATE_LOCK:
+        request_payload = payload if isinstance(payload, dict) else {}
+        warnings = []
+        webhook_candidate = None
+        if trigger == "label-studio-webhook":
+            try:
+                webhook_candidate, warning = _maybe_record_image_segmentation_candidate_from_webhook(
+                    request_payload
+                )
+                if warning:
+                    warnings.append(warning)
+            except ValueError as exc:
+                warnings.append(f"image segmentation webhook candidate ingest failed: {exc}")
+
+        dataset_samples, dataset_context = _build_image_segmentation_dataset(request_payload)
+        current = _load_state()
+        previous_run = int(current.get("training_run", 0))
+        training_run = previous_run + 1
+
+        try:
+            metadata = _train_placeholder_image_segmentation(
+                dataset_samples,
+                training_run,
+                dataset_context,
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "mode": "placeholder-image-segmentation",
+                "task_type": "image_segmentation",
+                "train_error": str(exc),
+                "next_state": current,
+                "train_record": None,
+                "metadata": None,
+                "warnings": warnings,
+            }
+
+        event_summary = _summarize_training_event(request_payload, trigger)
+        train_record = {
+            "run_id": metadata["training_run_id"],
+            "training_run": training_run,
+            "model_version": metadata["model_version"],
+            "received_at": metadata["trained_at"],
+            "mode": "placeholder-image-segmentation",
+            "task_type": "image_segmentation",
+            "dataset_size": metadata["dataset"]["total_size"],
+            "dataset_path": metadata["dataset"].get("source_path"),
+            "metrics": metadata["metrics"],
+            "warnings": warnings,
+            "webhook_candidate": webhook_candidate,
+            "event": event_summary,
+        }
+
+        next_state = {
+            "model_version": metadata["model_version"],
+            "training_run": training_run,
+            "updated_at": metadata["trained_at"],
+            "source": trigger,
+            "behavior": _behavior_for_run(training_run),
+            "text_classifier": current.get("text_classifier", _default_state()["text_classifier"]),
+            "image_classifier": current.get("image_classifier", _default_state()["image_classifier"]),
+            "image_segmentation": {
+                "active": True,
+                "model_version": metadata["model_version"],
+                "trained_at": metadata["trained_at"],
+                "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
+                "metadata_path": _IMAGE_SEG_METADATA_PATH,
+                "training_run_id": metadata["training_run_id"],
+                "dataset_summary": {
+                    "total_size": metadata["dataset"]["total_size"],
+                    "label_distribution": metadata["dataset"]["quality"]["label_distribution"],
+                },
+            },
+            "last_training_event": train_record,
+        }
+
+        _save_state(next_state)
+        _append_event_log(TRAINING_EVENT_LOG_PATH, train_record)
+        return {
+            "ok": True,
+            "status_code": 202,
+            "mode": "placeholder-image-segmentation",
+            "task_type": "image_segmentation",
+            "train_error": None,
+            "next_state": next_state,
+            "train_record": train_record,
+            "metadata": metadata,
+            "warnings": warnings,
+        }
+
+
 def _normalize_task_type(value):
     if value is None:
         return None
     normalized = str(value).strip().lower().replace("-", "_")
-    if normalized in {"text_classification", "image_classification"}:
+    if normalized in {"text_classification", "image_classification", "image_segmentation"}:
         return normalized
     return None
 
@@ -2236,6 +2868,8 @@ def _resolve_task_type(payload, route_task_type=None):
 
 def _run_training(payload, trigger, route_task_type=None):
     task_type = _resolve_task_type(payload, route_task_type)
+    if task_type == "image_segmentation":
+        return _run_image_segmentation_training(payload, trigger)
     if task_type == "image_classification":
         return _run_image_training(payload, trigger)
 
@@ -2244,6 +2878,16 @@ def _run_training(payload, trigger, route_task_type=None):
     outcome["status_code"] = 202
     outcome["task_type"] = "text_classification"
     return outcome
+
+
+def _train_route_task_type(route):
+    if "image-segmentation" in route:
+        return "image_segmentation"
+    if "image-classification" in route:
+        return "image_classification"
+    if "text-classification" in route:
+        return "text_classification"
+    return None
 
 
 def _read_text_classifier_metadata():
@@ -2260,6 +2904,13 @@ def _read_image_classifier_metadata():
     return None
 
 
+def _read_image_segmentation_metadata():
+    data = _read_json(_IMAGE_SEG_METADATA_PATH)
+    if isinstance(data, dict):
+        return data
+    return None
+
+
 class TrainerHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         route = self.path.rstrip("/") or "/"
@@ -2267,6 +2918,7 @@ class TrainerHandler(BaseHTTPRequestHandler):
             state = _load_state()
             text_metadata = _read_text_classifier_metadata()
             image_metadata = _read_image_classifier_metadata()
+            image_segmentation_metadata = _read_image_segmentation_metadata()
             _send_json(
                 self,
                 200,
@@ -2285,6 +2937,12 @@ class TrainerHandler(BaseHTTPRequestHandler):
                         "active": bool(image_metadata),
                         "metadata": image_metadata,
                         "metadata_path": _IMAGE_METADATA_PATH,
+                    },
+                    "image_segmentation": {
+                        "active": bool(image_segmentation_metadata),
+                        "metadata": image_segmentation_metadata,
+                        "metadata_path": _IMAGE_SEG_METADATA_PATH,
+                        "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
                     },
                 },
             )
@@ -2310,6 +2968,14 @@ class TrainerHandler(BaseHTTPRequestHandler):
             _send_json(self, 200, metadata)
             return
 
+        if route in ("/models/image-segmentation", "/models/image-segmentation/current"):
+            metadata = _read_image_segmentation_metadata()
+            if not metadata:
+                _send_json(self, 404, {"detail": "no trained image segmentation model"})
+                return
+            _send_json(self, 200, metadata)
+            return
+
         _send_json(self, 404, {"detail": "not found"})
 
     def do_POST(self):
@@ -2323,13 +2989,10 @@ class TrainerHandler(BaseHTTPRequestHandler):
             "/retrain/text-classification",
             "/train/image-classification",
             "/retrain/image-classification",
+            "/train/image-segmentation",
+            "/retrain/image-segmentation",
         ):
-            route_task_type = None
-            if "image-classification" in route:
-                route_task_type = "image_classification"
-            elif "text-classification" in route:
-                route_task_type = "text_classification"
-
+            route_task_type = _train_route_task_type(route)
             outcome = _run_training(payload, trigger="manual-train", route_task_type=route_task_type)
             next_state = outcome["next_state"]
             train_record = outcome["train_record"]
