@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""
+"""Decode a Label Studio Brush RLE prediction and write mask/overlay PNGs.
+
 看起来像没 mask？
 是 UI 透明度问题？
 是 RLE 错了？
 是 mask 在别的地方？
 是中心框分错？
 """
-"""Decode a Label Studio Brush RLE prediction and write mask/overlay PNGs."""
 
 from __future__ import annotations
 

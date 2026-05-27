@@ -305,6 +305,18 @@ The GPU service maps host `9092` to container `9090` by default; set `ML_BACKEND
 
 If Docker Desktop on WSL reports a port-forwarding error while publishing host ports `9091` or `9092`, leave the container URLs unchanged and override only the host ports for local checks, for example `TRAINER_PORT=19091 ML_BACKEND_GPU_PORT=19092 docker compose up -d trainer ml-backend-gpu`. Label Studio and the services still communicate over the Docker network with `trainer:9091` and `ml-backend-gpu:9090`.
 
+Run the Docker MobileSAM smoke test after project 3 has imported segmentation tasks and has a MobileSAM prediction:
+
+```bash
+python scripts/smoke_mobilesam_segmentation_docker.py \
+  --compose-dir infra \
+  --project-id 3 \
+  --expected-backend-url http://ml-backend-gpu:9090 \
+  --expected-model-version mobilesam-seg-v0001
+```
+
+If host `9092` is not forwarded in WSL, add `--host-ml-backend-url http://127.0.0.1:19092`. The smoke test checks Docker/compose, container health, checkpoint/model state, Label Studio DB state, latest prediction metadata, and writes the decoded mask plus overlay PNGs to `/tmp`; failures are reported per check.
+
 Bootstrap/import a segmentation review project:
 
 ```bash
