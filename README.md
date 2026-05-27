@@ -291,14 +291,17 @@ The ML backend expects the optional model libraries to be installed in the runti
 Optional Docker GPU MobileSAM runtime:
 
 ```bash
-# prerequisites: Docker can access the GPU, and this checkpoint exists locally
+# prerequisite: Docker can access the GPU
+docker run --rm --gpus all pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime nvidia-smi
+
+# prerequisite: this checkpoint exists locally
 # models/mobilesam/mobile_sam.pt
 cd infra
 docker compose build ml-backend-gpu
 docker compose up ml-backend-gpu
 ```
 
-The GPU service maps host `9092` to container `9090` by default; set `ML_BACKEND_GPU_PORT` to override the host port. It runs with `IMAGE_SEG_BACKEND=mobilesam`, `IMAGE_SEG_MODEL_TYPE=vit_t`, `IMAGE_SEG_CHECKPOINT=/app/models/mobilesam/mobile_sam.pt`, and `IMAGE_SEG_DEVICE=cuda`. The checkpoint is mounted from `../models:/app/models`; do not commit model weights or checkpoints to git.
+The GPU service maps host `9092` to container `9090` by default; set `ML_BACKEND_GPU_PORT` to override the host port. It runs with `IMAGE_SEG_BACKEND=mobilesam`, `IMAGE_SEG_MODEL_TYPE=vit_t`, `IMAGE_SEG_CHECKPOINT=/app/models/mobilesam/mobile_sam.pt`, and `IMAGE_SEG_DEVICE=cuda`. The checkpoint is mounted from `../models:/app/models`; do not commit model weights or checkpoints to git. To connect Label Studio to the GPU backend, use `http://ml-backend-gpu:9090` as the ML backend URL. Real MobileSAM pre-labels include `prediction_source=mobilesam-image-segmentation`, `backend=mobilesam`, and a Brush RLE with length greater than zero; they should not include placeholder fallback metadata.
 
 Bootstrap/import a segmentation review project:
 
