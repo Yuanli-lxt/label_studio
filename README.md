@@ -303,6 +303,8 @@ docker compose up ml-backend-gpu
 
 The GPU service maps host `9092` to container `9090` by default; set `ML_BACKEND_GPU_PORT` to override the host port. It runs with `MODEL_STATE_PATH=/app/demo_data/model_state/current_image_segmentation_model.json`, `IMAGE_SEG_BACKEND=mobilesam`, `IMAGE_SEG_MODEL_TYPE=vit_t`, `IMAGE_SEG_CHECKPOINT=/app/models/mobilesam/mobile_sam.pt`, and `IMAGE_SEG_DEVICE=cuda`. The checkpoint is mounted from `../models:/app/models`; do not commit model weights or checkpoints to git. To connect Label Studio to the GPU backend, use `http://ml-backend-gpu:9090` as the ML backend URL. Real MobileSAM pre-labels include `model_version=mobilesam-seg-v0001`, `prediction_source=mobilesam-image-segmentation`, `backend=mobilesam`, prompt metadata, and a Brush RLE with length greater than zero; they should not include placeholder fallback metadata. Label Studio may not preserve top-level prediction confidence in every database view, so use `model_version`, result `meta`, and backend response logs for traceability.
 
+If Docker Desktop on WSL reports a port-forwarding error while publishing host ports `9091` or `9092`, leave the container URLs unchanged and override only the host ports for local checks, for example `TRAINER_PORT=19091 ML_BACKEND_GPU_PORT=19092 docker compose up -d trainer ml-backend-gpu`. Label Studio and the services still communicate over the Docker network with `trainer:9091` and `ml-backend-gpu:9090`.
+
 Bootstrap/import a segmentation review project:
 
 ```bash
