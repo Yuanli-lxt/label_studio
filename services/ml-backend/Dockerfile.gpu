@@ -1,0 +1,33 @@
+FROM pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime
+
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    joblib==1.4.2 \
+    label-studio-converter==0.0.59 \
+    numpy \
+    opencv-python \
+    pillow==10.4.0 \
+    pycocotools \
+    pydantic \
+    python-dotenv \
+    scikit-learn==1.5.2 \
+    timm \
+    git+https://github.com/ChaoningZhang/MobileSAM.git
+
+COPY services/ml-backend/ /app/
+
+EXPOSE 9090
+
+CMD ["python", "app.py"]

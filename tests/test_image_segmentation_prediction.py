@@ -190,7 +190,7 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             checkpoint = tmp_dir / "mobile_sam.pt"
             checkpoint.write_text("fake checkpoint", encoding="utf-8")
-            fake_segment_anything = types.ModuleType("segment_anything")
+            fake_mobile_sam = types.ModuleType("mobile_sam")
 
             class FakeModel:
                 def to(self, device=None):
@@ -211,12 +211,12 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
                             mask[y][x] = 1
                     return [mask], [0.91], None
 
-            fake_segment_anything.sam_model_registry = {
+            fake_mobile_sam.sam_model_registry = {
                 "vit_t": lambda checkpoint=None: FakeModel(),
             }
-            fake_segment_anything.SamPredictor = FakePredictor
+            fake_mobile_sam.SamPredictor = FakePredictor
 
-            with patch.dict(sys.modules, {"segment_anything": fake_segment_anything}):
+            with patch.dict(sys.modules, {"mobile_sam": fake_mobile_sam, "segment_anything": None}):
                 backend = load_backend(
                     {
                         "MODEL_STATE_PATH": str(tmp_dir / "current_model.json"),

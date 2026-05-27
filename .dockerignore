@@ -1,0 +1,12 @@
+.git
+.venv
+.worktrees
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+demo_data
+models
+external

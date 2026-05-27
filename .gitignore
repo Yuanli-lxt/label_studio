@@ -17,3 +17,11 @@ demo_data/model_state/training_events.jsonl
 demo_data/model_state/text_classifier/
 demo_data/model_state/image_classifier/
 demo_data/
+
+# Local model weights and downloaded checkpoints
+models/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx

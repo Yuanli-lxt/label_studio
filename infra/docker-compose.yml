@@ -92,6 +92,50 @@ services:
       retries: 10
       start_period: 5s
 
+  ml-backend-gpu:
+    build:
+      context: ..
+      dockerfile: services/ml-backend/Dockerfile.gpu
+    restart: unless-stopped
+    gpus: all
+    environment:
+      PORT: "9090"
+      SERVICE_NAME: ml-backend-gpu
+      MODEL_STATE_PATH: /app/demo_data/model_state/current_model.json
+      MODEL_ARTIFACTS_DIR: /app/demo_data/model_state/text_classifier
+      TEXT_MODEL_ARTIFACTS_DIR: /app/demo_data/model_state/text_classifier
+      IMAGE_MODEL_ARTIFACTS_DIR: /app/demo_data/model_state/image_classifier
+      IMAGE_SEG_MODEL_ARTIFACTS_DIR: /app/demo_data/model_state/image_segmentation
+      IMAGE_SEG_BACKEND: mobilesam
+      IMAGE_SEG_MODEL_TYPE: vit_t
+      IMAGE_SEG_CHECKPOINT: /app/models/mobilesam/mobile_sam.pt
+      IMAGE_SEG_MODEL_ID: "${IMAGE_SEG_MODEL_ID:-facebook/sam2-hiera-large}"
+      IMAGE_SEG_DEVICE: cuda
+      IMAGE_LOCAL_FILES_ROOT: /app/demo_data/local-files
+      TRAINER_URL: http://trainer:9091/train
+      TRAINER_WEBHOOK_URL: http://trainer:9091/webhook/label-studio
+      TRAINER_TIMEOUT_SECONDS: "2.0"
+      TEXT_CLS_UNCERTAIN_THRESHOLD: "${TEXT_CLS_UNCERTAIN_THRESHOLD:-0.60}"
+      TEXT_CLS_UNCERTAIN_MARGIN: "${TEXT_CLS_UNCERTAIN_MARGIN:-0.10}"
+      IMAGE_CLS_UNCERTAIN_THRESHOLD: "${IMAGE_CLS_UNCERTAIN_THRESHOLD:-0.60}"
+    ports:
+      - "${ML_BACKEND_GPU_PORT:-9092}:9090"
+    volumes:
+      - ../models:/app/models
+      - ../demo_data:/app/demo_data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9090/health', timeout=2).status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   trainer:
     build:
       context: ../services/trainer

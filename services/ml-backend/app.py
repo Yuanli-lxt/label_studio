@@ -818,10 +818,13 @@ def _load_sam2_image_predictor():
     return predictor
 
 
-def _load_segment_anything_predictor():
+def _load_segment_anything_predictor(backend):
     if not IMAGE_SEG_CHECKPOINT:
         raise ValueError("IMAGE_SEG_CHECKPOINT is required for IMAGE_SEG_BACKEND=mobilesam or sam")
-    from segment_anything import SamPredictor, sam_model_registry
+    if backend == "mobilesam":
+        from mobile_sam import SamPredictor, sam_model_registry
+    else:
+        from segment_anything import SamPredictor, sam_model_registry
 
     if IMAGE_SEG_MODEL_TYPE not in sam_model_registry:
         available = ", ".join(sorted(str(item) for item in sam_model_registry.keys()))
@@ -847,7 +850,7 @@ def _load_image_segmentation_predictor(backend):
         if backend == "sam2":
             predictor = _load_sam2_image_predictor()
         elif backend in {"mobilesam", "sam"}:
-            predictor = _load_segment_anything_predictor()
+            predictor = _load_segment_anything_predictor(backend)
         else:
             raise ValueError(f"unsupported IMAGE_SEG_BACKEND={backend}")
 
