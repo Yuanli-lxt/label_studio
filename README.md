@@ -286,7 +286,7 @@ export IMAGE_SEG_MODEL_ID=facebook/sam2-hiera-large
 export IMAGE_SEG_DEVICE=cuda
 ```
 
-The ML backend expects the optional model libraries to be installed in the runtime image when `IMAGE_SEG_BACKEND` is `mobilesam`, `sam`, or `sam2`. If a real backend is requested but unavailable, prediction falls back to the placeholder mask and includes `requested_backend`, `backend_error`, and `fallback` in prediction confidence metadata. The current prompt strategy is a center-box prompt so the Label Studio contract is usable before object-specific prompts are added.
+The ML backend expects the optional model libraries to be installed in the runtime image when `IMAGE_SEG_BACKEND` is `mobilesam`, `sam`, or `sam2`. If a real backend is requested but unavailable, prediction falls back to the placeholder mask and includes `requested_backend`, `backend_error`, and `fallback` in prediction confidence metadata. SAM-compatible backends prefer an optional box prompt from `task.data.bbox`, `task.data.box`, `task.meta.bbox`, or `task.meta.box`; list values are pixel `x_min, y_min, x_max, y_max`, and mapping values can use `x/y/width/height` or `x_min/y_min/x_max/y_max`. Percent boxes must set `unit`, `units`, or `coordinate_system` to `percent`, `percentage`, `pct`, or `%`. If no box is provided, prediction falls back to the center-box prompt.
 
 Optional Docker GPU MobileSAM runtime:
 
@@ -301,7 +301,7 @@ docker compose build ml-backend-gpu
 docker compose up ml-backend-gpu
 ```
 
-The GPU service maps host `9092` to container `9090` by default; set `ML_BACKEND_GPU_PORT` to override the host port. It runs with `IMAGE_SEG_BACKEND=mobilesam`, `IMAGE_SEG_MODEL_TYPE=vit_t`, `IMAGE_SEG_CHECKPOINT=/app/models/mobilesam/mobile_sam.pt`, and `IMAGE_SEG_DEVICE=cuda`. The checkpoint is mounted from `../models:/app/models`; do not commit model weights or checkpoints to git. To connect Label Studio to the GPU backend, use `http://ml-backend-gpu:9090` as the ML backend URL. Real MobileSAM pre-labels include `prediction_source=mobilesam-image-segmentation`, `backend=mobilesam`, and a Brush RLE with length greater than zero; they should not include placeholder fallback metadata.
+The GPU service maps host `9092` to container `9090` by default; set `ML_BACKEND_GPU_PORT` to override the host port. It runs with `MODEL_STATE_PATH=/app/demo_data/model_state/current_image_segmentation_model.json`, `IMAGE_SEG_BACKEND=mobilesam`, `IMAGE_SEG_MODEL_TYPE=vit_t`, `IMAGE_SEG_CHECKPOINT=/app/models/mobilesam/mobile_sam.pt`, and `IMAGE_SEG_DEVICE=cuda`. The checkpoint is mounted from `../models:/app/models`; do not commit model weights or checkpoints to git. To connect Label Studio to the GPU backend, use `http://ml-backend-gpu:9090` as the ML backend URL. Real MobileSAM pre-labels include `model_version=mobilesam-seg-v0001`, `prediction_source=mobilesam-image-segmentation`, `backend=mobilesam`, prompt metadata, and a Brush RLE with length greater than zero; they should not include placeholder fallback metadata. Label Studio may not preserve top-level prediction confidence in every database view, so use `model_version`, result `meta`, and backend response logs for traceability.
 
 Bootstrap/import a segmentation review project:
 

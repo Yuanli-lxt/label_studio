@@ -101,7 +101,7 @@ services:
     environment:
       PORT: "9090"
       SERVICE_NAME: ml-backend-gpu
-      MODEL_STATE_PATH: /app/demo_data/model_state/current_model.json
+      MODEL_STATE_PATH: /app/demo_data/model_state/current_image_segmentation_model.json
       MODEL_ARTIFACTS_DIR: /app/demo_data/model_state/text_classifier
       TEXT_MODEL_ARTIFACTS_DIR: /app/demo_data/model_state/text_classifier
       IMAGE_MODEL_ARTIFACTS_DIR: /app/demo_data/model_state/image_classifier

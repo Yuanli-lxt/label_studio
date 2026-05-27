@@ -797,9 +797,130 @@ def _center_box_prompt(width, height):
     top = max(0.0, float(height) * 0.18)
     right = min(float(width - 1), float(width) * 0.82)
     bottom = min(float(height - 1), float(height) * 0.82)
+    return _box_prompt_array(left, top, right, bottom)
+
+
+def _box_prompt_array(left, top, right, bottom):
     if hasattr(np, "asarray") and hasattr(np, "float32"):
         return np.asarray([left, top, right, bottom], dtype=np.float32)
     return [left, top, right, bottom]
+
+
+def _as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _box_unit_is_percent(value):
+    unit = None
+    if isinstance(value, dict):
+        unit = value.get("unit") or value.get("units") or value.get("coordinate_system")
+    return str(unit or "").strip().lower() in {"percent", "percentage", "pct", "%"}
+
+
+def _box_values_from_mapping(value):
+    if all(key in value for key in ("x_min", "y_min", "x_max", "y_max")):
+        return (
+            _as_float(value.get("x_min")),
+            _as_float(value.get("y_min")),
+            _as_float(value.get("x_max")),
+            _as_float(value.get("y_max")),
+        )
+    if all(key in value for key in ("xmin", "ymin", "xmax", "ymax")):
+        return (
+            _as_float(value.get("xmin")),
+            _as_float(value.get("ymin")),
+            _as_float(value.get("xmax")),
+            _as_float(value.get("ymax")),
+        )
+    if all(key in value for key in ("left", "top", "right", "bottom")):
+        return (
+            _as_float(value.get("left")),
+            _as_float(value.get("top")),
+            _as_float(value.get("right")),
+            _as_float(value.get("bottom")),
+        )
+    if all(key in value for key in ("x", "y", "width", "height")):
+        left = _as_float(value.get("x"))
+        top = _as_float(value.get("y"))
+        box_width = _as_float(value.get("width"))
+        box_height = _as_float(value.get("height"))
+        if None in (left, top, box_width, box_height):
+            return None
+        return left, top, left + box_width, top + box_height
+    return None
+
+
+def _normalize_segmentation_box_prompt(value, width, height):
+    if value is None:
+        return None
+
+    percent = _box_unit_is_percent(value)
+    if isinstance(value, dict):
+        raw_values = value.get("box") or value.get("bbox")
+        if raw_values is not None:
+            nested = _normalize_segmentation_box_prompt(raw_values, width, height)
+            if nested and percent:
+                left, top, right, bottom = nested["box"]
+                return _clip_segmentation_box(
+                    left * float(width) / 100.0,
+                    top * float(height) / 100.0,
+                    right * float(width) / 100.0,
+                    bottom * float(height) / 100.0,
+                    width,
+                    height,
+                    "percent_xyxy",
+                )
+            return nested
+        raw_values = _box_values_from_mapping(value)
+    elif isinstance(value, (list, tuple)) and len(value) == 4:
+        raw_values = tuple(_as_float(item) for item in value)
+    else:
+        raw_values = None
+
+    if not raw_values or any(item is None for item in raw_values):
+        return None
+
+    left, top, right, bottom = raw_values
+    coordinate_system = "pixel_xyxy"
+    if percent:
+        left = left * float(width) / 100.0
+        right = right * float(width) / 100.0
+        top = top * float(height) / 100.0
+        bottom = bottom * float(height) / 100.0
+        coordinate_system = "percent_xyxy"
+    return _clip_segmentation_box(left, top, right, bottom, width, height, coordinate_system)
+
+
+def _clip_segmentation_box(left, top, right, bottom, width, height, coordinate_system):
+    left = max(0.0, min(float(width - 1), float(left)))
+    top = max(0.0, min(float(height - 1), float(top)))
+    right = max(0.0, min(float(width - 1), float(right)))
+    bottom = max(0.0, min(float(height - 1), float(bottom)))
+    if right <= left or bottom <= top:
+        return None
+    return {
+        "box": [left, top, right, bottom],
+        "coordinate_system": coordinate_system,
+    }
+
+
+def _segmentation_box_prompt_for_task(task, width, height):
+    data = task.get("data", {}) if isinstance(task.get("data"), dict) else {}
+    meta = task.get("meta", {}) if isinstance(task.get("meta"), dict) else {}
+    for source_name, container in (("data.bbox", data), ("data.box", data), ("meta.bbox", meta), ("meta.box", meta)):
+        key = source_name.split(".")[1]
+        prompt = _normalize_segmentation_box_prompt(container.get(key), width, height)
+        if prompt:
+            prompt["source"] = source_name
+            return prompt
+    return {
+        "box": [float(item) for item in _center_box_prompt(width, height)],
+        "coordinate_system": "pixel_xyxy",
+        "source": "fallback.center_box",
+    }
 
 
 def _load_sam2_image_predictor():
@@ -868,7 +989,8 @@ def _predict_with_sam_image_backend(task, backend, width, height):
     bundle = _load_image_segmentation_predictor(backend)
     predictor = bundle["predictor"]
     predictor.set_image(_load_image_rgb_array(image_path))
-    masks, scores, _ = predictor.predict(box=_center_box_prompt(width, height), multimask_output=False)
+    prompt = _segmentation_box_prompt_for_task(task, width, height)
+    masks, scores, _ = predictor.predict(box=_box_prompt_array(*prompt["box"]), multimask_output=False)
     selected_mask = _select_first_mask(masks)
     if selected_mask is None:
         raise ValueError(f"{backend} returned no masks")
@@ -882,6 +1004,7 @@ def _predict_with_sam_image_backend(task, backend, width, height):
         "prediction_source": f"{backend}-image-segmentation",
         "backend": backend,
         "image_path": image_path,
+        "prompt": prompt,
     }
 
 
@@ -976,7 +1099,9 @@ def _image_segmentation(task, parsed, state):
             {
                 "backend": backend_prediction["backend"],
                 "image_path": backend_prediction["image_path"],
-                "prompt": "center_box",
+                "prompt": backend_prediction["prompt"]["source"],
+                "prompt_box": backend_prediction["prompt"]["box"],
+                "prompt_coordinate_system": backend_prediction["prompt"]["coordinate_system"],
             }
         )
     elif selected_backend != "placeholder":
@@ -987,6 +1112,21 @@ def _image_segmentation(task, parsed, state):
                 "fallback": "placeholder",
             }
         )
+
+    result["meta"] = {
+        key: confidence[key]
+        for key in (
+            "prediction_source",
+            "rle_encoder",
+            "backend",
+            "requested_backend",
+            "prompt",
+            "prompt_box",
+            "prompt_coordinate_system",
+            "fallback",
+        )
+        if key in confidence
+    }
 
     return {
         "model_version": model_version,

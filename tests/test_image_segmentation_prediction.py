@@ -185,6 +185,56 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual("image-seg-v0042", response["model_version"])
             self.assertEqual("image-seg-v0042", response["results"][0]["model_version"])
 
+    def test_segmentation_box_prompt_prefers_task_data_bbox_pixels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {"data": {"bbox": [51, 55, 207, 165]}},
+                320,
+                240,
+            )
+
+            self.assertEqual("data.bbox", prompt["source"])
+            self.assertEqual("pixel_xyxy", prompt["coordinate_system"])
+            self.assertEqual([51.0, 55.0, 207.0, 165.0], prompt["box"])
+
+    def test_segmentation_box_prompt_supports_explicit_percent_box(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "data": {
+                        "box": {
+                            "x": 10,
+                            "y": 20,
+                            "width": 30,
+                            "height": 25,
+                            "unit": "percent",
+                        }
+                    }
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("data.box", prompt["source"])
+            self.assertEqual("percent_xyxy", prompt["coordinate_system"])
+            self.assertEqual([32.0, 48.0, 128.0, 108.0], prompt["box"])
+
+    def test_segmentation_box_prompt_falls_back_to_center_box(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {"data": {"image": "/data/local-files/?d=images/demo_blue.png"}},
+                320,
+                240,
+            )
+
+            self.assertEqual("fallback.center_box", prompt["source"])
+            self.assertEqual("pixel_xyxy", prompt["coordinate_system"])
+            for actual, expected in zip(prompt["box"], [57.6, 43.2, 262.4, 196.8]):
+                self.assertAlmostEqual(expected, actual, places=3)
+
     def test_mobilesam_backend_returns_real_backend_prediction_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -205,6 +255,7 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
                     self.image = image
 
                 def predict(self, box=None, multimask_output=False):
+                    FakePredictor.last_box = [float(item) for item in box]
                     mask = [[0 for _ in range(10)] for _ in range(8)]
                     for y in range(2, 6):
                         for x in range(3, 8):
@@ -238,7 +289,10 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
                         "tasks": [
                             {
                                 "id": "seg-mobile",
-                                "data": {"image": "/data/local-files/?d=images/demo_blue.png"},
+                                "data": {
+                                    "image": "/data/local-files/?d=images/demo_blue.png",
+                                    "bbox": [179, 47, 284, 118],
+                                },
                             }
                         ],
                     }
@@ -251,6 +305,10 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertGreaterEqual(prediction["score"], 0.9)
             self.assertIsInstance(prediction["result"][0]["value"]["rle"], list)
             self.assertGreater(len(prediction["result"][0]["value"]["rle"]), 0)
+            self.assertEqual([179.0, 47.0, 284.0, 118.0], FakePredictor.last_box)
+            self.assertEqual("data.bbox", prediction["confidence"]["prompt"])
+            self.assertEqual("mobilesam", prediction["result"][0]["meta"]["backend"])
+            self.assertEqual("data.bbox", prediction["result"][0]["meta"]["prompt"])
 
     def test_sam2_backend_missing_dependency_falls_back_with_backend_error(self):
         with tempfile.TemporaryDirectory() as tmp:
