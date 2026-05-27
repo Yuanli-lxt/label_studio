@@ -1,0 +1,13 @@
+{
+  "model_version": "mobilesam-seg-v0001",
+  "training_run": 1,
+  "updated_at": "2026-05-27T00:00:00Z",
+  "source": "mobile-sam-gpu-demo",
+  "image_segmentation": {
+    "active": true,
+    "model_version": "mobilesam-seg-v0001",
+    "trained_at": "2026-05-27T00:00:00Z",
+    "metadata_path": "/app/demo_data/model_state/image_segmentation/metadata.json",
+    "backend": "mobilesam"
+  }
+}
