@@ -305,17 +305,21 @@ The GPU service maps host `9092` to container `9090` by default; set `ML_BACKEND
 
 If Docker Desktop on WSL reports a port-forwarding error while publishing host ports `9091` or `9092`, leave the container URLs unchanged and override only the host ports for local checks, for example `TRAINER_PORT=19091 ML_BACKEND_GPU_PORT=19092 docker compose up -d trainer ml-backend-gpu`. Label Studio and the services still communicate over the Docker network with `trainer:9091` and `ml-backend-gpu:9090`.
 
-Run the Docker MobileSAM smoke test after project 3 has imported segmentation tasks and has a MobileSAM prediction:
+Run the Docker MobileSAM smoke test after the segmentation review project has imported tasks and has a MobileSAM prediction. Fresh Label Studio databases may assign a different project ID, so use the project ID printed by the bootstrap/import scripts instead of hard-coding project `3`. The host health URL is usually `http://127.0.0.1:9092`, while Label Studio must use the Docker-network backend URL `http://ml-backend-gpu:9090`.
 
 ```bash
 python scripts/smoke_mobilesam_segmentation_docker.py \
   --compose-dir infra \
-  --project-id 3 \
+  --project-id <segmentation-project-id> \
   --expected-backend-url http://ml-backend-gpu:9090 \
-  --expected-model-version mobilesam-seg-v0001
+  --expected-model-version mobilesam-seg-v0001 \
+  --host-ml-backend-url http://127.0.0.1:9092 \
+  --out-dir /tmp
 ```
 
-If host `9092` is not forwarded in WSL, add `--host-ml-backend-url http://127.0.0.1:19092`. The smoke test checks Docker/compose, container health, checkpoint/model state, Label Studio DB state, latest prediction metadata, and writes the decoded mask plus overlay PNGs to `/tmp`; failures are reported per check.
+If host `9092` is not forwarded in WSL, use `--host-ml-backend-url http://127.0.0.1:19092`. The smoke test checks Docker/compose, container health, checkpoint/model state, Label Studio DB state, latest prediction metadata, and writes the decoded mask plus overlay PNGs to `/tmp`; failures are reported per check. Before running it, verify the bind mounts expose `/app/models/mobilesam/mobile_sam.pt` and `/app/demo_data/model_state/current_image_segmentation_model.json` inside `ml-backend-gpu`.
+
+Recent local smoke example with a fresh Label Studio database created project `1` and passed with `host_backend_url=http://127.0.0.1:9092`, `project_backend_url=http://ml-backend-gpu:9090`, `model_version=mobilesam-seg-v0001`, `prediction_id=1`, `task_id=1`, `brushlabels=True`, `rle=True`, `choices=False`, and MobileSAM/backend/`prompt_box` metadata present. The decoded overlay sanity check reported `prompt_bbox=[179.0, 47.0, 284.0, 118.0]`, `mask_bbox=[176, 44, 286, 121]`, and wrote `/tmp/mobilesam_prediction_1_mask.png` plus `/tmp/mobilesam_prediction_1_overlay.png`.
 
 Bootstrap/import a segmentation review project:
 
