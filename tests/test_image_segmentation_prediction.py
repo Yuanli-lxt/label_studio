@@ -221,6 +221,179 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual("percent_xyxy", prompt["coordinate_system"])
             self.assertEqual([32.0, 48.0, 128.0, 108.0], prompt["box"])
 
+    def test_segmentation_box_prompt_supports_normalized_box(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {"data": {"bbox": {"x_min": 0.1, "y_min": 0.2, "x_max": 0.4, "y_max": 0.45, "normalized": True}}},
+                320,
+                240,
+            )
+
+            self.assertEqual("data.bbox", prompt["source"])
+            self.assertEqual("normalized_xyxy", prompt["coordinate_system"])
+            self.assertEqual([32.0, 48.0, 128.0, 108.0], prompt["box"])
+
+    def test_segmentation_box_prompt_keeps_data_bbox_ahead_of_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "data": {
+                        "bbox": [10, 20, 60, 90],
+                        "candidates": [{"bbox": [100, 110, 220, 230], "score": 0.99}],
+                    }
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("data.bbox", prompt["source"])
+            self.assertEqual([10.0, 20.0, 60.0, 90.0], prompt["box"])
+
+    def test_segmentation_box_prompt_supports_meta_bbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "data": {"candidates": [{"bbox": [100, 110, 220, 230], "score": 0.99}]},
+                    "meta": {"bbox": [20, 30, 70, 100]},
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("meta.bbox", prompt["source"])
+            self.assertEqual([20.0, 30.0, 70.0, 100.0], prompt["box"])
+
+    def test_segmentation_box_prompt_uses_highest_scored_data_candidate_bbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "data": {
+                        "candidates": [
+                            {"bbox": [10, 10, 50, 50], "score": 0.2},
+                            {"bbox": [80, 70, 140, 150], "confidence": 0.9},
+                        ]
+                    }
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("webhook_candidate.bbox", prompt["source"])
+            self.assertEqual([80.0, 70.0, 140.0, 150.0], prompt["box"])
+
+    def test_segmentation_box_prompt_uses_highest_scored_meta_candidate_box(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "meta": {
+                        "candidates": [
+                            {"box": [10, 10, 50, 50], "confidence": 0.4},
+                            {"box": [90, 70, 150, 160], "score": 0.95},
+                        ]
+                    }
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("webhook_candidate.box", prompt["source"])
+            self.assertEqual([90.0, 70.0, 150.0, 160.0], prompt["box"])
+
+    def test_segmentation_box_prompt_uses_first_valid_unscored_candidate_bbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "data": {
+                        "candidates": [
+                            {"bbox": [20, 30, 80, 100]},
+                            {"bbox": [90, 100, 180, 200]},
+                        ]
+                    }
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("webhook_candidate.bbox", prompt["source"])
+            self.assertEqual([20.0, 30.0, 80.0, 100.0], prompt["box"])
+
+    def test_segmentation_box_prompt_skips_invalid_candidate_bbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "data": {
+                        "candidates": [
+                            {"bbox": [80, 80, 10, 10], "score": 0.99},
+                            {"bbox": [40, 50, 120, 140], "score": 0.3},
+                        ]
+                    }
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("webhook_candidate.bbox", prompt["source"])
+            self.assertEqual([40.0, 50.0, 120.0, 140.0], prompt["box"])
+
+    def test_segmentation_box_prompt_converts_prediction_rectanglelabels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "predictions": [
+                        {
+                            "result": [
+                                {
+                                    "type": "rectanglelabels",
+                                    "value": {
+                                        "x": 10,
+                                        "y": 20,
+                                        "width": 30,
+                                        "height": 25,
+                                        "rectanglelabels": ["Object"],
+                                    },
+                                }
+                            ]
+                        }
+                    ]
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("prediction.rectanglelabels", prompt["source"])
+            self.assertEqual("percent_xyxy", prompt["coordinate_system"])
+            self.assertEqual([32.0, 48.0, 128.0, 108.0], prompt["box"])
+
+    def test_segmentation_box_prompt_ignores_classification_choices_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "predictions": [
+                        {
+                            "result": [
+                                {
+                                    "type": "choices",
+                                    "value": {"choices": ["Product"]},
+                                }
+                            ]
+                        }
+                    ]
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("center_fallback", prompt["source"])
+
     def test_segmentation_box_prompt_falls_back_to_center_box(self):
         with tempfile.TemporaryDirectory() as tmp:
             backend = self._backend(Path(tmp))
@@ -230,10 +403,88 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
                 240,
             )
 
-            self.assertEqual("fallback.center_box", prompt["source"])
+            self.assertEqual("center_fallback", prompt["source"])
             self.assertEqual("pixel_xyxy", prompt["coordinate_system"])
             for actual, expected in zip(prompt["box"], [57.6, 43.2, 262.4, 196.8]):
                 self.assertAlmostEqual(expected, actual, places=3)
+
+    def test_segmentation_box_prompt_falls_back_when_all_candidates_lack_bbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = self._backend(Path(tmp))
+            prompt = backend._segmentation_box_prompt_for_task(
+                {
+                    "data": {"candidates": [{"label": "Product"}, {"score": 0.9}]},
+                    "meta": {"candidates": [{"value": {"choices": ["Other"]}}]},
+                },
+                320,
+                240,
+            )
+
+            self.assertEqual("center_fallback", prompt["source"])
+            for actual, expected in zip(prompt["box"], [57.6, 43.2, 262.4, 196.8]):
+                self.assertAlmostEqual(expected, actual, places=3)
+
+    def test_mobilesam_result_meta_records_candidate_prompt_source_and_box(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            checkpoint = tmp_dir / "mobile_sam.pt"
+            checkpoint.write_text("fake checkpoint", encoding="utf-8")
+            fake_mobile_sam = types.ModuleType("mobile_sam")
+
+            class FakeModel:
+                def to(self, device=None):
+                    return self
+
+            class FakePredictor:
+                def __init__(self, model):
+                    self.model = model
+
+                def set_image(self, image):
+                    pass
+
+                def predict(self, box=None, multimask_output=False):
+                    mask = [[1 for _ in range(4)] for _ in range(4)]
+                    return [mask], [0.88], None
+
+            fake_mobile_sam.sam_model_registry = {"vit_t": lambda checkpoint=None: FakeModel()}
+            fake_mobile_sam.SamPredictor = FakePredictor
+
+            with patch.dict(sys.modules, {"mobile_sam": fake_mobile_sam, "segment_anything": None}):
+                backend = load_backend(
+                    {
+                        "MODEL_STATE_PATH": str(tmp_dir / "current_model.json"),
+                        "TEXT_MODEL_ARTIFACTS_DIR": str(tmp_dir / "text_artifacts"),
+                        "IMAGE_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_artifacts"),
+                        "IMAGE_SEG_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_segmentation"),
+                        "IMAGE_LOCAL_FILES_ROOT": str(ROOT / "demo_data" / "local-files"),
+                        "IMAGE_SEG_BACKEND": "mobilesam",
+                        "IMAGE_SEG_MODEL_TYPE": "vit_t",
+                        "IMAGE_SEG_CHECKPOINT": str(checkpoint),
+                        "IMAGE_SEG_DEVICE": "cpu",
+                    }
+                )
+                backend._load_image_rgb_array = lambda image_path: [[0, 0, 0]]
+                config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+                response = backend._predict(
+                    {
+                        "label_config": config,
+                        "tasks": [
+                            {
+                                "id": "seg-candidate",
+                                "data": {
+                                    "image": "/data/local-files/?d=images/demo_blue.png",
+                                    "candidates": [{"bbox": [25, 35, 120, 160], "score": 0.77}],
+                                },
+                            }
+                        ],
+                    }
+                )
+
+            meta = response["results"][0]["result"][0]["meta"]
+            self.assertEqual("mobilesam", meta["backend"])
+            self.assertEqual("mobilesam-image-segmentation", meta["prediction_source"])
+            self.assertEqual("webhook_candidate.bbox", meta["prompt"])
+            self.assertEqual([25.0, 35.0, 120.0, 160.0], meta["prompt_box"])
 
     def test_mobilesam_backend_returns_real_backend_prediction_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:

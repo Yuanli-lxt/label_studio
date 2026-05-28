@@ -820,6 +820,15 @@ def _box_unit_is_percent(value):
     return str(unit or "").strip().lower() in {"percent", "percentage", "pct", "%"}
 
 
+def _box_unit_is_normalized(value):
+    if not isinstance(value, dict):
+        return False
+    return value.get("normalized") is True or str(value.get("coordinate_system", "")).strip().lower() in {
+        "normalized",
+        "normalized_xyxy",
+    }
+
+
 def _box_values_from_mapping(value):
     if all(key in value for key in ("x_min", "y_min", "x_max", "y_max")):
         return (
@@ -858,20 +867,23 @@ def _normalize_segmentation_box_prompt(value, width, height):
         return None
 
     percent = _box_unit_is_percent(value)
+    normalized = _box_unit_is_normalized(value)
     if isinstance(value, dict):
         raw_values = value.get("box") or value.get("bbox")
         if raw_values is not None:
             nested = _normalize_segmentation_box_prompt(raw_values, width, height)
-            if nested and percent:
+            if nested and (percent or normalized):
                 left, top, right, bottom = nested["box"]
+                divisor = 100.0 if percent else 1.0
+                coordinate_system = "percent_xyxy" if percent else "normalized_xyxy"
                 return _clip_segmentation_box(
-                    left * float(width) / 100.0,
-                    top * float(height) / 100.0,
-                    right * float(width) / 100.0,
-                    bottom * float(height) / 100.0,
+                    left * float(width) / divisor,
+                    top * float(height) / divisor,
+                    right * float(width) / divisor,
+                    bottom * float(height) / divisor,
                     width,
                     height,
-                    "percent_xyxy",
+                    coordinate_system,
                 )
             return nested
         raw_values = _box_values_from_mapping(value)
@@ -885,12 +897,13 @@ def _normalize_segmentation_box_prompt(value, width, height):
 
     left, top, right, bottom = raw_values
     coordinate_system = "pixel_xyxy"
-    if percent:
-        left = left * float(width) / 100.0
-        right = right * float(width) / 100.0
-        top = top * float(height) / 100.0
-        bottom = bottom * float(height) / 100.0
-        coordinate_system = "percent_xyxy"
+    if percent or normalized:
+        divisor = 100.0 if percent else 1.0
+        left = left * float(width) / divisor
+        right = right * float(width) / divisor
+        top = top * float(height) / divisor
+        bottom = bottom * float(height) / divisor
+        coordinate_system = "percent_xyxy" if percent else "normalized_xyxy"
     return _clip_segmentation_box(left, top, right, bottom, width, height, coordinate_system)
 
 
@@ -916,11 +929,112 @@ def _segmentation_box_prompt_for_task(task, width, height):
         if prompt:
             prompt["source"] = source_name
             return prompt
+    prompt = _choose_best_candidate_box(data.get("candidates"), width, height)
+    if prompt:
+        return prompt
+    prompt = _choose_best_candidate_box(meta.get("candidates"), width, height)
+    if prompt:
+        return prompt
+    prompt = _extract_rectanglelabels_prompt_box(task, width, height)
+    if prompt:
+        return prompt
     return {
         "box": [float(item) for item in _center_box_prompt(width, height)],
         "coordinate_system": "pixel_xyxy",
-        "source": "fallback.center_box",
+        "source": "center_fallback",
     }
+
+
+def _candidate_score(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    for key in ("score", "confidence", "probability", "prob"):
+        score = _as_float(candidate.get(key))
+        if score is not None:
+            return score
+    return None
+
+
+def _extract_bbox_from_candidate(candidate, width, height):
+    if not isinstance(candidate, dict):
+        return None
+    for key in ("bbox", "box"):
+        prompt = _normalize_segmentation_box_prompt(candidate.get(key), width, height)
+        if prompt:
+            prompt["source"] = f"webhook_candidate.{key}"
+            return prompt
+    value = candidate.get("value")
+    if isinstance(value, dict):
+        for key in ("bbox", "box"):
+            prompt = _normalize_segmentation_box_prompt(value.get(key), width, height)
+            if prompt:
+                prompt["source"] = f"webhook_candidate.{key}"
+                return prompt
+    return None
+
+
+def _choose_best_candidate_box(candidates, width, height):
+    if not isinstance(candidates, list):
+        return None
+    valid = []
+    for index, candidate in enumerate(candidates):
+        prompt = _extract_bbox_from_candidate(candidate, width, height)
+        if prompt:
+            valid.append((index, _candidate_score(candidate), prompt))
+    if not valid:
+        return None
+    scored = [item for item in valid if item[1] is not None]
+    if scored:
+        return max(scored, key=lambda item: (item[1], -item[0]))[2]
+    return valid[0][2]
+
+
+def _iter_label_studio_results(task, key):
+    rows = task.get(key)
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        results = row.get("result")
+        if not isinstance(results, list):
+            continue
+        for result in results:
+            if isinstance(result, dict):
+                yield result
+
+
+def _extract_bbox_from_rectanglelabels(result, width, height, source):
+    if result.get("type") != "rectanglelabels":
+        return None
+    value = result.get("value")
+    if not isinstance(value, dict):
+        return None
+    raw_values = _box_values_from_mapping(value)
+    if not raw_values or any(item is None for item in raw_values):
+        return None
+    left, top, right, bottom = raw_values
+    prompt = _clip_segmentation_box(
+        left * float(width) / 100.0,
+        top * float(height) / 100.0,
+        right * float(width) / 100.0,
+        bottom * float(height) / 100.0,
+        width,
+        height,
+        "percent_xyxy",
+    )
+    if prompt:
+        prompt["source"] = source
+    return prompt
+
+
+def _extract_rectanglelabels_prompt_box(task, width, height):
+    for key, source in (("predictions", "prediction.rectanglelabels"), ("annotations", "annotation.rectanglelabels")):
+        for result in _iter_label_studio_results(task, key):
+            prompt = _extract_bbox_from_rectanglelabels(result, width, height, source)
+            if prompt:
+                return prompt
+    return None
 
 
 def _load_sam2_image_predictor():
