@@ -9,8 +9,43 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 ML_BACKEND_APP = ROOT / "services" / "ml-backend" / "app.py"
+
+
+def assert_segmentation_quality_schema(testcase, meta):
+    testcase.assertIn("mask_quality", meta)
+    testcase.assertIn("review", meta)
+    mask_quality = meta["mask_quality"]
+    review = meta["review"]
+    testcase.assertIsInstance(mask_quality["valid_mask"], bool)
+    testcase.assertIsInstance(mask_quality["mask_area_px"], int)
+    testcase.assertIsInstance(mask_quality["mask_area_ratio"], (int, float))
+    if mask_quality["image_width"] > 0 and mask_quality["image_height"] > 0:
+        testcase.assertGreaterEqual(mask_quality["mask_area_ratio"], 0)
+        testcase.assertLessEqual(mask_quality["mask_area_ratio"], 1)
+    testcase.assertIsInstance(mask_quality["image_width"], int)
+    testcase.assertIsInstance(mask_quality["image_height"], int)
+    testcase.assertIsInstance(review["needs_review"], bool)
+    testcase.assertIn(review["review_priority"], ["low", "medium", "high"])
+    testcase.assertIsInstance(review["review_priority_score"], (int, float))
+    testcase.assertIsInstance(review["review_reason"], list)
+
+
+def assert_prompt_stability_schema(testcase, uncertainty):
+    testcase.assertEqual("prompt_stability", uncertainty["method"])
+    testcase.assertIs(uncertainty["enabled"], True)
+    testcase.assertGreaterEqual(uncertainty["num_prompt_variants"], 2)
+    testcase.assertGreaterEqual(uncertainty["num_valid_masks"], 2)
+    testcase.assertIsInstance(uncertainty["mean_pairwise_iou"], (int, float))
+    testcase.assertIsInstance(uncertainty["min_pairwise_iou"], (int, float))
+    testcase.assertIsInstance(uncertainty["max_pairwise_iou"], (int, float))
+    testcase.assertIsInstance(uncertainty["disagreement_area_ratio"], (int, float))
+    testcase.assertIsInstance(uncertainty["stable"], bool)
+    testcase.assertIn(uncertainty["stability_bucket"], ["high", "medium", "low", "unknown"])
+    testcase.assertIsInstance(uncertainty["reason"], list)
 
 
 def load_backend(env_overrides):
@@ -103,6 +138,7 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual(["Object"], result["value"]["brushlabels"])
             self.assertIsInstance(result["value"]["rle"], list)
             self.assertGreater(len(result["value"]["rle"]), 0)
+            assert_segmentation_quality_schema(self, result["meta"])
 
     def test_segmentation_placeholder_score_ignores_state_boost(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,6 +193,7 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             prediction = response["results"][0]
             self.assertEqual("fallback-minimal", prediction["confidence"]["rle_encoder"])
             self.assertEqual("rle", prediction["result"][0]["value"]["format"])
+            assert_segmentation_quality_schema(self, prediction["result"][0]["meta"])
 
     def test_prediction_uses_trained_segmentation_metadata_version(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -485,6 +522,7 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual("mobilesam-image-segmentation", meta["prediction_source"])
             self.assertEqual("webhook_candidate.bbox", meta["prompt"])
             self.assertEqual([25.0, 35.0, 120.0, 160.0], meta["prompt_box"])
+            assert_segmentation_quality_schema(self, meta)
 
     def test_mobilesam_backend_returns_real_backend_prediction_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -560,6 +598,153 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual("data.bbox", prediction["confidence"]["prompt"])
             self.assertEqual("mobilesam", prediction["result"][0]["meta"]["backend"])
             self.assertEqual("data.bbox", prediction["result"][0]["meta"]["prompt"])
+            assert_segmentation_quality_schema(self, prediction["result"][0]["meta"])
+            self.assertNotIn("uncertainty", prediction["result"][0]["meta"])
+
+    def test_mobilesam_prompt_stability_metadata_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            checkpoint = tmp_dir / "mobile_sam.pt"
+            checkpoint.write_text("fake checkpoint", encoding="utf-8")
+            fake_mobile_sam = types.ModuleType("mobile_sam")
+
+            class FakeModel:
+                def to(self, device=None):
+                    return self
+
+            class FakePredictor:
+                calls = []
+
+                def __init__(self, model):
+                    self.model = model
+
+                def set_image(self, image):
+                    self.image = image
+
+                def predict(self, box=None, multimask_output=False):
+                    box = [float(item) for item in box]
+                    FakePredictor.calls.append(box)
+                    mask = np.zeros((20, 20), dtype=np.uint8)
+                    shift = int(round((box[0] - 40.0) / 2.0))
+                    shift = max(-1, min(1, shift))
+                    mask[5:15, 5 + shift : 15 + shift] = 1
+                    return [mask], [0.9], None
+
+            fake_mobile_sam.sam_model_registry = {"vit_t": lambda checkpoint=None: FakeModel()}
+            fake_mobile_sam.SamPredictor = FakePredictor
+
+            with patch.dict(sys.modules, {"mobile_sam": fake_mobile_sam, "segment_anything": None}):
+                backend = load_backend(
+                    {
+                        "MODEL_STATE_PATH": str(tmp_dir / "current_model.json"),
+                        "TEXT_MODEL_ARTIFACTS_DIR": str(tmp_dir / "text_artifacts"),
+                        "IMAGE_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_artifacts"),
+                        "IMAGE_SEG_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_segmentation"),
+                        "IMAGE_LOCAL_FILES_ROOT": str(ROOT / "demo_data" / "local-files"),
+                        "IMAGE_SEG_BACKEND": "mobilesam",
+                        "IMAGE_SEG_MODEL_TYPE": "vit_t",
+                        "IMAGE_SEG_CHECKPOINT": str(checkpoint),
+                        "IMAGE_SEG_DEVICE": "cpu",
+                        "IMAGE_SEG_PROMPT_STABILITY_ENABLED": "true",
+                        "IMAGE_SEG_PROMPT_STABILITY_VARIANTS": "7",
+                        "IMAGE_SEG_PROMPT_STABILITY_JITTER": "0.05",
+                    }
+                )
+                backend._load_image_rgb_array = lambda image_path: np.zeros((20, 20, 3), dtype=np.uint8)
+                config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+                response = backend._predict(
+                    {
+                        "label_config": config,
+                        "tasks": [
+                            {
+                                "id": "seg-stability",
+                                "data": {
+                                    "image": "/data/local-files/?d=images/demo_blue.png",
+                                    "bbox": [40, 40, 140, 140],
+                                },
+                            }
+                        ],
+                    }
+                )
+
+        result = response["results"][0]["result"][0]
+        self.assertEqual("brushlabels", result["type"])
+        self.assertIn("uncertainty", result["meta"])
+        assert_prompt_stability_schema(self, result["meta"]["uncertainty"])
+        self.assertGreaterEqual(len(FakePredictor.calls), 2)
+
+    def test_mobilesam_prompt_stability_failure_keeps_prediction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            checkpoint = tmp_dir / "mobile_sam.pt"
+            checkpoint.write_text("fake checkpoint", encoding="utf-8")
+            fake_mobile_sam = types.ModuleType("mobile_sam")
+
+            class FakeModel:
+                def to(self, device=None):
+                    return self
+
+            class FakePredictor:
+                calls = 0
+
+                def __init__(self, model):
+                    self.model = model
+
+                def set_image(self, image):
+                    self.image = image
+
+                def predict(self, box=None, multimask_output=False):
+                    FakePredictor.calls += 1
+                    if FakePredictor.calls > 1:
+                        raise RuntimeError("variant prediction failed")
+                    mask = np.zeros((20, 20), dtype=np.uint8)
+                    mask[5:15, 5:15] = 1
+                    return [mask], [0.9], None
+
+            fake_mobile_sam.sam_model_registry = {"vit_t": lambda checkpoint=None: FakeModel()}
+            fake_mobile_sam.SamPredictor = FakePredictor
+
+            with patch.dict(sys.modules, {"mobile_sam": fake_mobile_sam, "segment_anything": None}):
+                backend = load_backend(
+                    {
+                        "MODEL_STATE_PATH": str(tmp_dir / "current_model.json"),
+                        "TEXT_MODEL_ARTIFACTS_DIR": str(tmp_dir / "text_artifacts"),
+                        "IMAGE_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_artifacts"),
+                        "IMAGE_SEG_MODEL_ARTIFACTS_DIR": str(tmp_dir / "image_segmentation"),
+                        "IMAGE_LOCAL_FILES_ROOT": str(ROOT / "demo_data" / "local-files"),
+                        "IMAGE_SEG_BACKEND": "mobilesam",
+                        "IMAGE_SEG_MODEL_TYPE": "vit_t",
+                        "IMAGE_SEG_CHECKPOINT": str(checkpoint),
+                        "IMAGE_SEG_DEVICE": "cpu",
+                        "IMAGE_SEG_PROMPT_STABILITY_ENABLED": "true",
+                    }
+                )
+                backend._load_image_rgb_array = lambda image_path: np.zeros((20, 20, 3), dtype=np.uint8)
+                config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+                response = backend._predict(
+                    {
+                        "label_config": config,
+                        "tasks": [
+                            {
+                                "id": "seg-stability-failure",
+                                "data": {
+                                    "image": "/data/local-files/?d=images/demo_blue.png",
+                                    "bbox": [40, 40, 140, 140],
+                                },
+                            }
+                        ],
+                    }
+                )
+
+        result = response["results"][0]["result"][0]
+        self.assertEqual("brushlabels", result["type"])
+        self.assertEqual("rle", result["value"]["format"])
+        uncertainty = result["meta"]["uncertainty"]
+        self.assertEqual("prompt_stability", uncertainty["method"])
+        self.assertIs(uncertainty["enabled"], True)
+        self.assertIs(uncertainty["stable"], False)
+        self.assertEqual("unknown", uncertainty["stability_bucket"])
+        self.assertIn("prompt_stability_error", uncertainty["reason"])
 
     def test_sam2_backend_missing_dependency_falls_back_with_backend_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -594,6 +779,11 @@ class ImageSegmentationPredictionTests(unittest.TestCase):
             self.assertEqual("sam2", prediction["confidence"]["requested_backend"])
             self.assertIn("backend_error", prediction["confidence"])
             self.assertNotEqual("", prediction["confidence"]["backend_error"])
+            meta = prediction["result"][0]["meta"]
+            assert_segmentation_quality_schema(self, meta)
+            self.assertIs(meta["review"]["needs_review"], True)
+            self.assertEqual("high", meta["review"]["review_priority"])
+            self.assertIn("backend_fallback_or_error", meta["review"]["review_reason"])
 
 
 if __name__ == "__main__":

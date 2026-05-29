@@ -118,6 +118,18 @@ def summarize_prediction_flags(row: Dict[str, Any]) -> Dict[str, bool]:
         isinstance(value, dict) and "prompt_box" in value and bool(value.get("prompt_box"))
         for value in _walk_values(result)
     )
+    has_mask_quality = any(
+        isinstance(value, dict) and _valid_mask_quality_schema(value.get("mask_quality"))
+        for value in _walk_values(result)
+    )
+    has_review = any(
+        isinstance(value, dict) and _valid_review_schema(value.get("review"))
+        for value in _walk_values(result)
+    )
+    has_uncertainty = any(
+        isinstance(value, dict) and _valid_uncertainty_schema(value.get("uncertainty"))
+        for value in _walk_values(result)
+    )
     return {
         "has_brushlabels": any(item.get("type") == "brushlabels" for item in items),
         "has_rle": any(
@@ -131,21 +143,83 @@ def summarize_prediction_flags(row: Dict[str, Any]) -> Dict[str, bool]:
         "has_mobilesam": has_mobilesam,
         "has_backend_meta": has_backend_meta,
         "has_prompt_box": has_prompt_box,
+        "has_mask_quality": has_mask_quality,
+        "has_review": has_review,
+        "has_uncertainty": has_uncertainty,
     }
 
 
-def validate_prediction_summary(row: Dict[str, Any], expected_model_version: str) -> List[str]:
+def _valid_mask_quality_schema(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required = ("valid_mask", "mask_area_px", "mask_area_ratio", "image_width", "image_height")
+    if any(key not in value for key in required):
+        return False
+    if not isinstance(value.get("valid_mask"), bool):
+        return False
+    if not isinstance(value.get("mask_area_px"), int):
+        return False
+    if not isinstance(value.get("mask_area_ratio"), (int, float)):
+        return False
+    if not isinstance(value.get("image_width"), int) or not isinstance(value.get("image_height"), int):
+        return False
+    if value["image_width"] > 0 and value["image_height"] > 0:
+        return 0 <= float(value["mask_area_ratio"]) <= 1
+    return True
+
+
+def _valid_review_schema(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if not isinstance(value.get("needs_review"), bool):
+        return False
+    if value.get("review_priority") not in {"low", "medium", "high"}:
+        return False
+    if not isinstance(value.get("review_priority_score"), (int, float)):
+        return False
+    return isinstance(value.get("review_reason"), list)
+
+
+def _valid_uncertainty_schema(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("method") != "prompt_stability":
+        return False
+    if value.get("enabled") is not True:
+        return False
+    if not isinstance(value.get("stable"), bool):
+        return False
+    if value.get("stability_bucket") not in {"high", "medium", "low", "unknown"}:
+        return False
+    return isinstance(value.get("reason"), list)
+
+
+def validate_prediction_summary(
+    row: Dict[str, Any],
+    expected_model_version: str,
+    require_uncertainty: bool = False,
+) -> List[str]:
     failures: List[str] = []
     if not row:
         return [f"no prediction found for model_version={expected_model_version}"]
     if row.get("model_version") != expected_model_version:
         failures.append(f"model_version={row.get('model_version')!r}")
     flags = summarize_prediction_flags(row)
-    for key in ("has_brushlabels", "has_rle", "has_mobilesam", "has_backend_meta", "has_prompt_box"):
+    for key in (
+        "has_brushlabels",
+        "has_rle",
+        "has_mobilesam",
+        "has_backend_meta",
+        "has_prompt_box",
+        "has_mask_quality",
+        "has_review",
+    ):
         if flags.get(key) is not True:
             failures.append(f"{key}={flags.get(key)!r}")
     if flags.get("has_choices") is not False:
         failures.append(f"has_choices={flags.get('has_choices')!r}")
+    if require_uncertainty and flags.get("has_uncertainty") is not True:
+        failures.append("has_uncertainty=False")
     return failures
 
 
@@ -485,7 +559,11 @@ def run_smoke(args: argparse.Namespace) -> Tuple[bool, Dict[str, Any]]:
             task_id=args.task_id,
             prediction_id=args.prediction_id,
         )
-        failures = validate_prediction_summary(prediction, args.expected_model_version)
+        failures = validate_prediction_summary(
+            prediction,
+            args.expected_model_version,
+            require_uncertainty=args.enable_prompt_stability,
+        )
         if failures:
             raise SmokeError("; ".join(failures))
         flags = summarize_prediction_flags(prediction)
@@ -571,6 +649,9 @@ def print_report(report: Dict[str, Any], passed: bool) -> None:
         "has_mobilesam",
         "has_backend_meta",
         "has_prompt_box",
+        "has_mask_quality",
+        "has_review",
+        "has_uncertainty",
         "prediction_result_json",
         "mask_nonzero",
         "mask_bbox",
@@ -599,6 +680,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--trigger-prediction", action="store_true")
     parser.add_argument("--import-demo-tasks", action="store_true")
     parser.add_argument("--skip-overlay", action="store_true")
+    parser.add_argument(
+        "--enable-prompt-stability",
+        action="store_true",
+        help="require prompt-stability uncertainty metadata on the latest persisted prediction",
+    )
     parser.add_argument("--timeout", type=float, default=5.0)
     return parser.parse_args(argv)
 

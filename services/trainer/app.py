@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 import base64
 import time
@@ -21,6 +22,15 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
+
+_TRAINER_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TRAINER_DIR not in sys.path:
+    sys.path.insert(0, _TRAINER_DIR)
+
+from segmentation_corrections import (  # noqa: E402
+    build_segmentation_correction_record_from_task,
+    summarize_segmentation_correction_records,
+)
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "trainer")
 PORT = int(os.getenv("PORT", "9091"))
@@ -84,6 +94,10 @@ _IMAGE_SEG_METADATA_PATH = os.path.join(IMAGE_SEG_MODEL_ARTIFACTS_DIR, "metadata
 _IMAGE_SEG_LAST_DATASET_PATH = os.path.join(
     IMAGE_SEG_MODEL_ARTIFACTS_DIR,
     "last_training_dataset.jsonl",
+)
+_IMAGE_SEG_CORRECTION_DELTA_PATH = os.path.join(
+    IMAGE_SEG_MODEL_ARTIFACTS_DIR,
+    "correction_delta_dataset.jsonl",
 )
 
 # Backward-compatible aliases retained for existing tests/scripts.
@@ -723,6 +737,7 @@ def _parse_image_segmentation_sample_from_full_task(task, fallback_project_id=No
         raise ValueError(f"Label Studio task {task_id} has no annotations")
 
     selected = None
+    selected_annotation = None
     for annotation in annotations:
         if not isinstance(annotation, dict):
             continue
@@ -737,12 +752,15 @@ def _parse_image_segmentation_sample_from_full_task(task, fallback_project_id=No
             "updated_at": updated_at,
             **mask,
         }
+        selected_annotation = annotation
 
     if selected is None:
         raise ValueError(
             f"Label Studio task {task_id} has no non-cancelled image segmentation annotation "
             "with Object BrushLabels RLE mask"
         )
+
+    correction_delta = build_segmentation_correction_record_from_task(task, selected_annotation)
 
     return {
         "task_id": task_id,
@@ -755,6 +773,7 @@ def _parse_image_segmentation_sample_from_full_task(task, fallback_project_id=No
         "source": "label_studio_webhook_task_fetch",
         "annotation_id": selected["annotation_id"],
         "updated_at": selected["updated_at"] or _utc_now_iso(),
+        "correction_delta": correction_delta,
     }
 
 
@@ -921,6 +940,8 @@ def _read_image_segmentation_training_candidate_samples():
                     "updated_at": row.get("updated_at"),
                     "source": row.get("source") or "training_candidate",
                 }
+                if isinstance(row.get("correction_delta"), dict):
+                    sample["correction_delta"] = row["correction_delta"]
                 samples.append(sample)
                 used += 1
     except OSError as exc:
@@ -1397,22 +1418,23 @@ def _normalize_manual_image_segmentation_samples(samples):
         if original_width is None or original_height is None:
             continue
 
-        normalized.append(
-            {
-                "image": image_ref,
-                "image_path": image_path,
-                "label": label,
-                "rle": rle,
-                "original_width": original_width,
-                "original_height": original_height,
-                "dataset_split": dataset_split,
-                "task_id": sample.get("task_id"),
-                "annotation_id": sample.get("annotation_id"),
-                "project_id": sample.get("project_id"),
-                "updated_at": sample.get("updated_at"),
-                "source": sample.get("source") or "manual",
-            }
-        )
+        normalized_sample = {
+            "image": image_ref,
+            "image_path": image_path,
+            "label": label,
+            "rle": rle,
+            "original_width": original_width,
+            "original_height": original_height,
+            "dataset_split": dataset_split,
+            "task_id": sample.get("task_id"),
+            "annotation_id": sample.get("annotation_id"),
+            "project_id": sample.get("project_id"),
+            "updated_at": sample.get("updated_at"),
+            "source": sample.get("source") or "manual",
+        }
+        if isinstance(sample.get("correction_delta"), dict):
+            normalized_sample["correction_delta"] = sample["correction_delta"]
+        normalized.append(normalized_sample)
     return normalized
 
 
@@ -1443,6 +1465,7 @@ def _parse_image_segmentation_export_task(task):
         mask = _extract_brush_mask_result(annotation.get("result", []))
         if mask is None:
             continue
+        correction_delta = build_segmentation_correction_record_from_task(task, annotation)
         samples.append(
             {
                 "image": image_ref,
@@ -1453,6 +1476,7 @@ def _parse_image_segmentation_export_task(task):
                 "updated_at": _normalize_text(annotation.get("updated_at") or annotation.get("created_at")),
                 "dataset_split": dataset_split,
                 "source": "label_studio_export",
+                "correction_delta": correction_delta,
                 **mask,
             }
         )
@@ -1742,6 +1766,22 @@ def _image_segmentation_dataset_quality_report(samples):
             },
         },
     }
+
+
+def _segmentation_correction_records_from_samples(samples):
+    records = []
+    for sample in samples:
+        if isinstance(sample, dict) and isinstance(sample.get("correction_delta"), dict):
+            records.append(sample["correction_delta"])
+    return records
+
+
+def _write_segmentation_correction_delta_dataset(records):
+    _ensure_parent(_IMAGE_SEG_CORRECTION_DELTA_PATH)
+    with open(_IMAGE_SEG_CORRECTION_DELTA_PATH, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return summarize_segmentation_correction_records(records, _IMAGE_SEG_CORRECTION_DELTA_PATH)
 
 
 def _split_dataset_indices(labels, eval_split_ratio, min_eval_samples):
@@ -2447,6 +2487,8 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
     with open(_IMAGE_SEG_LAST_DATASET_PATH, "w", encoding="utf-8") as dataset_file:
         for sample in samples:
             dataset_file.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    correction_records = _segmentation_correction_records_from_samples(samples)
+    correction_summary = _write_segmentation_correction_delta_dataset(correction_records)
 
     artifact = {
         "model_version": model_version,
@@ -2484,6 +2526,7 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
             "evaluation_scope": "not_applicable_placeholder",
             "mask_count": len(samples),
         },
+        "correction_deltas": correction_summary,
         "model_details": {
             "name": "placeholder_center_mask",
             "rle_format": "label_studio_brush",
@@ -2498,6 +2541,7 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
             "artifact_path": _IMAGE_SEG_ARTIFACT_PATH,
             "metadata_path": _IMAGE_SEG_METADATA_PATH,
             "placeholder_model_path": _IMAGE_SEG_ARTIFACT_PATH,
+            "correction_delta_dataset_path": _IMAGE_SEG_CORRECTION_DELTA_PATH,
         },
         "framework": {
             "library": "none",

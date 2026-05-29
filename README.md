@@ -8,6 +8,7 @@ Implemented:
 - Phase 3: minimal HITL retrain loop + persistent state
 - Phase 4: real trainable text classification (`scikit-learn` TF-IDF + LogisticRegression)
 - Phase 4 extension: real trainable image classification (`scikit-learn` + lightweight image features)
+- Image segmentation HITL: MobileSAM/placeholder pre-labels, BrushLabels/RLE output, mask quality metadata, opt-in prompt-stability uncertainty metadata, and human correction delta dataset
 
 Current tuning pass focus:
 - improved text-classification dataset quality checks
@@ -18,6 +19,7 @@ Still intentionally demo-level:
 - image detection and text NER remain deterministic rule-based
 - no heavy training infrastructure
 - no active learning automation
+- future segmentation work includes a learned correction-risk predictor, diversity-aware active review queue, true active learning acquisition loop, SAM2 runtime backend, and label-quality auditing / second-review recommendation
 
 ## Repository Structure
 
@@ -267,6 +269,7 @@ Artifact location:
 - `demo_data/model_state/image_segmentation/metadata.json`
 - `demo_data/model_state/image_segmentation/placeholder_model.json`
 - `demo_data/model_state/image_segmentation/last_training_dataset.jsonl`
+- `demo_data/model_state/image_segmentation/correction_delta_dataset.jsonl`
 
 Runtime pre-label backend:
 
@@ -280,13 +283,24 @@ export IMAGE_SEG_MODEL_TYPE=vit_t
 export IMAGE_SEG_CHECKPOINT=/model-state/image_segmentation/mobile_sam.pt
 export IMAGE_SEG_DEVICE=cpu
 
+# optional prompt-stability uncertainty instrumentation
+export IMAGE_SEG_PROMPT_STABILITY_ENABLED=true
+export IMAGE_SEG_PROMPT_STABILITY_VARIANTS=7
+export IMAGE_SEG_PROMPT_STABILITY_JITTER=0.05
+
 # SAM2 path
 export IMAGE_SEG_BACKEND=sam2
 export IMAGE_SEG_MODEL_ID=facebook/sam2-hiera-large
 export IMAGE_SEG_DEVICE=cuda
 ```
 
-The ML backend expects the optional model libraries to be installed in the runtime image when `IMAGE_SEG_BACKEND` is `mobilesam`, `sam`, or `sam2`. If a real backend is requested but unavailable, prediction falls back to the placeholder mask and includes `requested_backend`, `backend_error`, and `fallback` in prediction confidence metadata. SAM-compatible backends choose one box prompt in this order: `task.data.bbox`/`task.data.box`, `task.meta.bbox`/`task.meta.box`, the best valid bbox from `data.candidates[]` or `meta.candidates[]`, the first valid Label Studio `rectanglelabels` result in predictions or annotations, then a center-box fallback. Candidate boxes with `score` or `confidence` use the highest-scored valid box; unscored candidates keep input order. List values are pixel `x_min, y_min, x_max, y_max`, and mapping values can use `x/y/width/height` or `x_min/y_min/x_max/y_max`. Percent boxes must set `unit`, `units`, or `coordinate_system` to `percent`, `percentage`, `pct`, or `%`; boxes with `normalized=true` use 0-1 coordinates; Label Studio `rectanglelabels` use percent `x/y/width/height`. Result `meta` records `prompt` and pixel `prompt_box` for traceability.
+The ML backend expects the optional model libraries to be installed in the runtime image when `IMAGE_SEG_BACKEND` is `mobilesam`, `sam`, or `sam2`. If a real backend is requested but unavailable, prediction falls back to the placeholder mask and includes `requested_backend`, `backend_error`, and `fallback` in prediction confidence metadata. SAM-compatible backends choose one box prompt in this order: `task.data.bbox`/`task.data.box`, `task.meta.bbox`/`task.meta.box`, the best valid bbox from `data.candidates[]` or `meta.candidates[]`, the first valid Label Studio `rectanglelabels` result in predictions or annotations, then a center-box fallback. Candidate boxes with `score` or `confidence` use the highest-scored valid box; unscored candidates keep input order. List values are pixel `x_min, y_min, x_max, y_max`, and mapping values can use `x/y/width/height` or `x_min/y_min/x_max/y_max`. Percent boxes must set `unit`, `units`, or `coordinate_system` to `percent`, `percentage`, `pct`, or `%`; boxes with `normalized=true` use 0-1 coordinates; Label Studio `rectanglelabels` use percent `x/y/width/height`. Result `meta` records `prompt`, pixel `prompt_box`, and `mask_bbox` for traceability.
+
+The segmentation backend now attaches lightweight segmentation metadata instrumentation to each BrushLabels/RLE prediction. The `mask_quality` fields record mask area, prompt/mask bbox alignment, RLE length, border-touching behavior, and image geometry; the quality-aware `review` metadata records simple flags such as `needs_review`, `review_priority`, and `review_reason`. This is a foundation for future uncertainty estimation, prompt-stability uncertainty, and human-correction learning; it is not a full active learning loop or autonomous label-quality assessment.
+
+When enabled, the MobileSAM-compatible backend can perform prompt-stability uncertainty estimation by perturbing the selected prompt bbox, generating multiple candidate masks, and measuring mask stability through pairwise IoU and disagreement area. The resulting `uncertainty` metadata records fields such as `mean_pairwise_iou`, `min_pairwise_iou`, `disagreement_area_ratio`, `stable`, and `stability_bucket`. This remains lightweight uncertainty instrumentation, not a full active learning loop. Prompt-stability is disabled by default, so normal MobileSAM prediction remains a single-pass inference path unless `IMAGE_SEG_PROMPT_STABILITY_ENABLED=true` is set. SAM2 remains optional/future-ready in this repository; this change does not implement a SAM2 runtime. The metadata is a foundation for future correction-risk learning and active review queues.
+
+The segmentation HITL flow now records model-vs-human correction deltas when human-corrected BrushLabels masks are available. For each paired model prediction and human annotation, the trainer computes IoU, Dice, added/removed area, correction area ratio, bbox alignment, centroid shift, and correction severity. These records are persisted as a JSONL artifact and summarized in segmentation metadata. This does not train a correction-risk model yet; it creates the supervised data foundation for future correction-risk learning.
 
 Optional Docker GPU MobileSAM runtime:
 
@@ -317,9 +331,11 @@ python scripts/smoke_mobilesam_segmentation_docker.py \
   --out-dir /tmp
 ```
 
-If host `9092` is not forwarded in WSL, use `--host-ml-backend-url http://127.0.0.1:19092`. The smoke test checks Docker/compose, container health, checkpoint/model state, Label Studio DB state, latest prediction metadata, and writes the decoded mask plus overlay PNGs to `/tmp`; failures are reported per check. Before running it, verify the bind mounts expose `/app/models/mobilesam/mobile_sam.pt` and `/app/demo_data/model_state/current_image_segmentation_model.json` inside `ml-backend-gpu`.
+If host `9092` is not forwarded in WSL, use `--host-ml-backend-url http://127.0.0.1:19092`. The smoke test checks Docker/compose, container health, checkpoint/model state, Label Studio DB state, latest prediction metadata including `mask_quality`, `review`, `needs_review`, `review_priority`, and `review_reason`, and writes the decoded mask plus overlay PNGs to `/tmp`; failures are reported per check. Before running it, verify the bind mounts expose `/app/models/mobilesam/mobile_sam.pt` and `/app/demo_data/model_state/current_image_segmentation_model.json` inside `ml-backend-gpu`.
 
-Recent local smoke example with a fresh Label Studio database created project `1` and passed with `host_backend_url=http://127.0.0.1:9092`, `project_backend_url=http://ml-backend-gpu:9090`, `model_version=mobilesam-seg-v0001`, `prediction_id=1`, `task_id=1`, `brushlabels=True`, `rle=True`, `choices=False`, and MobileSAM/backend/`prompt_box` metadata present. The decoded overlay sanity check reported `prompt_bbox=[179.0, 47.0, 284.0, 118.0]`, `mask_bbox=[176, 44, 286, 121]`, and wrote `/tmp/mobilesam_prediction_1_mask.png` plus `/tmp/mobilesam_prediction_1_overlay.png`.
+Prompt-stability uncertainty is optional in the smoke script. Start the backend with `IMAGE_SEG_PROMPT_STABILITY_ENABLED=true`, generate a fresh prediction, then add `--enable-prompt-stability` to require `uncertainty` metadata in the latest persisted prediction. The default smoke command does not require this because prompt-stability performs multiple MobileSAM inference calls.
+
+Recent local smoke example with a fresh Label Studio database created project `1` and passed with `host_backend_url=http://127.0.0.1:9092`, `project_backend_url=http://ml-backend-gpu:9090`, `model_version=mobilesam-seg-v0001`, `prediction_id=1`, `task_id=1`, `brushlabels=True`, `rle=True`, `choices=False`, and MobileSAM/backend/`prompt_box`/`mask_quality`/`review` metadata present. The decoded overlay sanity check reported `prompt_bbox=[179.0, 47.0, 284.0, 118.0]`, `mask_bbox=[176, 44, 286, 121]`, and wrote `/tmp/mobilesam_prediction_1_mask.png` plus `/tmp/mobilesam_prediction_1_overlay.png`.
 
 Bootstrap/import a segmentation review project:
 

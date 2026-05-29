@@ -25,10 +25,28 @@ class LabelStudioRLEOverlayDebugTests(unittest.TestCase):
             "original_width": 4,
             "original_height": 3,
             "value": {"format": "rle", "rle": [1, 2, 3], "brushlabels": ["Object"]},
+            "meta": {
+                "mask_quality": {
+                    "valid_mask": True,
+                    "mask_area_px": 4,
+                    "mask_area_ratio": 0.333,
+                    "image_width": 4,
+                    "image_height": 3,
+                },
+                "review": {
+                    "needs_review": False,
+                    "review_priority": "low",
+                    "review_priority_score": 0,
+                    "review_reason": [],
+                },
+            },
         }
         payload = {"results": [{"model_version": "m", "result": [result]}]}
 
-        self.assertIs(result, module.extract_brush_rle_result(payload))
+        extracted = module.extract_brush_rle_result(payload)
+        self.assertIs(result, extracted)
+        self.assertIn("mask_quality", extracted["meta"])
+        self.assertIn("review", extracted["meta"])
 
     def test_mask_bbox_returns_inclusive_bounds(self):
         module = load_module()

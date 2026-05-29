@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -15,6 +16,13 @@ try:
     from PIL import Image
 except Exception:  # pragma: no cover - handled by fallback path
     Image = None
+
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
+from segmentation_quality import evaluate_segmentation_quality
+from segmentation_uncertainty import evaluate_prompt_stability, generate_bbox_prompt_variants
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "ml-backend")
 PORT = int(os.getenv("PORT", "9090"))
@@ -52,6 +60,14 @@ IMAGE_SEG_MODEL_TYPE = os.getenv("IMAGE_SEG_MODEL_TYPE", "vit_t").strip()
 IMAGE_SEG_CHECKPOINT = os.getenv("IMAGE_SEG_CHECKPOINT", "").strip()
 IMAGE_SEG_MODEL_ID = os.getenv("IMAGE_SEG_MODEL_ID", "facebook/sam2-hiera-large").strip()
 IMAGE_SEG_DEVICE = os.getenv("IMAGE_SEG_DEVICE", "cpu").strip()
+IMAGE_SEG_PROMPT_STABILITY_ENABLED = os.getenv("IMAGE_SEG_PROMPT_STABILITY_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+IMAGE_SEG_PROMPT_STABILITY_VARIANTS = int(os.getenv("IMAGE_SEG_PROMPT_STABILITY_VARIANTS", "7"))
+IMAGE_SEG_PROMPT_STABILITY_JITTER = float(os.getenv("IMAGE_SEG_PROMPT_STABILITY_JITTER", "0.05"))
 
 _TEXT_MODEL_LOCK = threading.Lock()
 _TEXT_MODEL_CACHE = {
@@ -738,12 +754,34 @@ def _encode_segmentation_mask_rle(mask):
 
 
 def _placeholder_segmentation_rle(width, height):
+    mask = _placeholder_segmentation_mask(width, height)
+    if mask is None:
+        return _fallback_mask_rle(width, height), "fallback-minimal", None
+    rle, encoder = _encode_segmentation_mask_rle(mask)
+    return rle, encoder, mask
+
+
+def _placeholder_segmentation_mask(width, height):
     try:
         mask = np.zeros((height, width), dtype=np.uint8)
         mask[height // 4 : max(height // 4 + 1, (height * 3) // 4), width // 4 : max(width // 4 + 1, (width * 3) // 4)] = 1
-        return _encode_segmentation_mask_rle(mask)
+        return mask
     except Exception:
-        return _fallback_mask_rle(width, height), "fallback-minimal"
+        return None
+
+
+def _segmentation_mask_bbox(mask):
+    try:
+        arr = np.asarray(mask)
+        if arr.ndim == 3:
+            arr = arr[0]
+        foreground = arr > 0
+        if not foreground.any():
+            return None
+        ys, xs = np.where(foreground)
+        return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+    except Exception:
+        return None
 
 
 def _normalize_image_segmentation_backend(value):
@@ -1092,7 +1130,15 @@ def _load_image_segmentation_predictor(backend):
         bundle = {"backend": backend, "predictor": predictor}
         _IMAGE_SEG_MODEL_CACHE["fingerprint"] = fingerprint
         _IMAGE_SEG_MODEL_CACHE["bundle"] = bundle
-        return bundle
+    return bundle
+
+
+def _predict_sam_mask_for_prompt(predictor, prompt_box):
+    masks, scores, _ = predictor.predict(box=_box_prompt_array(*prompt_box), multimask_output=False)
+    selected_mask = _select_first_mask(masks)
+    if selected_mask is None:
+        raise ValueError("SAM-compatible backend returned no masks")
+    return selected_mask, scores
 
 
 def _predict_with_sam_image_backend(task, backend, width, height):
@@ -1104,12 +1150,11 @@ def _predict_with_sam_image_backend(task, backend, width, height):
     predictor = bundle["predictor"]
     predictor.set_image(_load_image_rgb_array(image_path))
     prompt = _segmentation_box_prompt_for_task(task, width, height)
-    masks, scores, _ = predictor.predict(box=_box_prompt_array(*prompt["box"]), multimask_output=False)
-    selected_mask = _select_first_mask(masks)
-    if selected_mask is None:
-        raise ValueError(f"{backend} returned no masks")
+    selected_mask, scores = _predict_sam_mask_for_prompt(predictor, prompt["box"])
     rle, rle_encoder = _encode_segmentation_mask_rle(selected_mask)
+    mask_bbox = _segmentation_mask_bbox(selected_mask)
     score_value = _first_segmentation_score(scores)
+    uncertainty = _evaluate_sam_prompt_stability(predictor, selected_mask, prompt, width, height)
 
     return {
         "rle": rle,
@@ -1119,7 +1164,53 @@ def _predict_with_sam_image_backend(task, backend, width, height):
         "backend": backend,
         "image_path": image_path,
         "prompt": prompt,
+        "mask": selected_mask,
+        "mask_bbox": mask_bbox,
+        "uncertainty": uncertainty,
     }
+
+
+def _evaluate_sam_prompt_stability(predictor, original_mask, prompt, width, height):
+    if not IMAGE_SEG_PROMPT_STABILITY_ENABLED:
+        return None
+    try:
+        variants = generate_bbox_prompt_variants(
+            prompt.get("box"),
+            width,
+            height,
+            jitter_ratio=IMAGE_SEG_PROMPT_STABILITY_JITTER,
+        )
+        limit = max(1, int(IMAGE_SEG_PROMPT_STABILITY_VARIANTS))
+        variants = variants[:limit]
+        if not variants:
+            return {
+                "method": "prompt_stability",
+                "enabled": True,
+                "error": "valid prompt bbox is required",
+                "stable": False,
+                "stability_bucket": "unknown",
+                "reason": ["prompt_stability_error"],
+            }
+
+        masks = [original_mask]
+        for variant in variants[1:]:
+            mask, _ = _predict_sam_mask_for_prompt(predictor, variant["bbox"])
+            masks.append(mask)
+        return evaluate_prompt_stability(
+            masks,
+            prompt_variants=variants,
+            image_width=width,
+            image_height=height,
+        )["uncertainty"]
+    except Exception as exc:
+        return {
+            "method": "prompt_stability",
+            "enabled": True,
+            "error": str(exc),
+            "stable": False,
+            "stability_bucket": "unknown",
+            "reason": ["prompt_stability_error"],
+        }
 
 
 def _select_first_mask(masks):
@@ -1175,8 +1266,11 @@ def _image_segmentation(task, parsed, state):
         rle_encoder = backend_prediction["rle_encoder"]
         score_value = backend_prediction["score"]
         prediction_source = backend_prediction["prediction_source"]
+        selected_mask = backend_prediction.get("mask")
+        mask_bbox = backend_prediction.get("mask_bbox")
     else:
-        rle, rle_encoder = _placeholder_segmentation_rle(width, height)
+        rle, rle_encoder, selected_mask = _placeholder_segmentation_rle(width, height)
+        mask_bbox = _segmentation_mask_bbox(selected_mask)
         score_value = 0.65
         prediction_source = "placeholder-image-segmentation"
 
@@ -1234,13 +1328,29 @@ def _image_segmentation(task, parsed, state):
             "rle_encoder",
             "backend",
             "requested_backend",
+            "backend_error",
             "prompt",
             "prompt_box",
             "prompt_coordinate_system",
+            "mask_bbox",
             "fallback",
         )
         if key in confidence
     }
+    if mask_bbox is not None:
+        result["meta"]["mask_bbox"] = mask_bbox
+    if backend_prediction and backend_prediction.get("uncertainty"):
+        result["meta"]["uncertainty"] = backend_prediction["uncertainty"]
+    quality_metadata = evaluate_segmentation_quality(
+        selected_mask,
+        width,
+        height,
+        prompt_bbox=confidence.get("prompt_box"),
+        mask_bbox=mask_bbox,
+        rle_length=len(rle) if isinstance(rle, list) else None,
+        backend_metadata=confidence,
+    )
+    result["meta"].update(quality_metadata)
 
     return {
         "model_version": model_version,

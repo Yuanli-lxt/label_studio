@@ -156,6 +156,13 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
             self.assertTrue(Path(module._IMAGE_SEG_METADATA_PATH).exists())
             self.assertTrue(Path(module._IMAGE_SEG_ARTIFACT_PATH).exists())
             self.assertTrue(Path(module._IMAGE_SEG_LAST_DATASET_PATH).exists())
+            self.assertTrue(Path(module._IMAGE_SEG_CORRECTION_DELTA_PATH).exists())
+            self.assertEqual(0, metadata["correction_deltas"]["records_total"])
+            self.assertEqual(module._IMAGE_SEG_CORRECTION_DELTA_PATH, metadata["correction_deltas"]["output_path"])
+            self.assertEqual(
+                module._IMAGE_SEG_CORRECTION_DELTA_PATH,
+                metadata["artifacts"]["correction_delta_dataset_path"],
+            )
 
     def test_manual_segmentation_sample_falls_back_to_image_path(self):
         with tempfile.TemporaryDirectory() as tmp:

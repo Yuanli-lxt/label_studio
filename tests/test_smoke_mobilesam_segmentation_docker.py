@@ -57,7 +57,30 @@ class SmokeMobileSAMSegmentationDockerTests(unittest.TestCase):
                 {
                     "type": "brushlabels",
                     "value": {"format": "rle", "rle": [1, 2, 3], "brushlabels": ["Object"]},
-                    "meta": {"backend": "mobilesam", "prompt_box": [1, 2, 3, 4]},
+                    "meta": {
+                        "backend": "mobilesam",
+                        "prompt_box": [1, 2, 3, 4],
+                        "mask_quality": {
+                            "valid_mask": True,
+                            "mask_area_px": 10,
+                            "mask_area_ratio": 0.1,
+                            "image_width": 10,
+                            "image_height": 10,
+                        },
+                        "review": {
+                            "needs_review": False,
+                            "review_priority": "low",
+                            "review_priority_score": 0,
+                            "review_reason": [],
+                        },
+                        "uncertainty": {
+                            "method": "prompt_stability",
+                            "enabled": True,
+                            "stable": True,
+                            "stability_bucket": "high",
+                            "reason": [],
+                        },
+                    },
                 }
             ],
         }
@@ -70,6 +93,44 @@ class SmokeMobileSAMSegmentationDockerTests(unittest.TestCase):
         self.assertTrue(flags["has_mobilesam"])
         self.assertTrue(flags["has_backend_meta"])
         self.assertTrue(flags["has_prompt_box"])
+        self.assertTrue(flags["has_mask_quality"])
+        self.assertTrue(flags["has_review"])
+        self.assertTrue(flags["has_uncertainty"])
+
+    def test_prediction_summary_requires_uncertainty_only_when_requested(self):
+        module = load_module()
+        row = {
+            "model_version": "mobilesam-seg-v0001",
+            "result": [
+                {
+                    "type": "brushlabels",
+                    "value": {"format": "rle", "rle": [1, 2, 3], "brushlabels": ["Object"]},
+                    "meta": {
+                        "backend": "mobilesam",
+                        "prompt_box": [1, 2, 3, 4],
+                        "mask_quality": {
+                            "valid_mask": True,
+                            "mask_area_px": 10,
+                            "mask_area_ratio": 0.1,
+                            "image_width": 10,
+                            "image_height": 10,
+                        },
+                        "review": {
+                            "needs_review": False,
+                            "review_priority": "low",
+                            "review_priority_score": 0,
+                            "review_reason": [],
+                        },
+                    },
+                }
+            ],
+        }
+
+        self.assertEqual([], module.validate_prediction_summary(row, "mobilesam-seg-v0001"))
+        self.assertIn(
+            "has_uncertainty=False",
+            module.validate_prediction_summary(row, "mobilesam-seg-v0001", require_uncertainty=True),
+        )
 
     def test_prediction_flags_report_choices_and_wrong_version(self):
         module = load_module()
@@ -100,6 +161,7 @@ class SmokeMobileSAMSegmentationDockerTests(unittest.TestCase):
         self.assertEqual("mobilesam-seg-v0001", args.expected_model_version)
         self.assertEqual(Path("infra"), args.compose_dir)
         self.assertIsNone(args.host_ml_backend_url)
+        self.assertIs(args.enable_prompt_stability, False)
 
 
 if __name__ == "__main__":
