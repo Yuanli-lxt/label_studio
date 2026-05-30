@@ -8,7 +8,7 @@ Implemented:
 - Phase 3: minimal HITL retrain loop + persistent state
 - Phase 4: real trainable text classification (`scikit-learn` TF-IDF + LogisticRegression)
 - Phase 4 extension: real trainable image classification (`scikit-learn` + lightweight image features)
-- Image segmentation HITL: MobileSAM/placeholder pre-labels, BrushLabels/RLE output, mask quality metadata, opt-in prompt-stability uncertainty metadata, and human correction delta dataset
+- Image segmentation HITL: MobileSAM/placeholder pre-labels, BrushLabels/RLE output, mask quality metadata, opt-in prompt-stability uncertainty metadata, human correction delta dataset, and lightweight correction-risk predictor when enough correction data exists
 
 Current tuning pass focus:
 - improved text-classification dataset quality checks
@@ -19,7 +19,7 @@ Still intentionally demo-level:
 - image detection and text NER remain deterministic rule-based
 - no heavy training infrastructure
 - no active learning automation
-- future segmentation work includes a learned correction-risk predictor, diversity-aware active review queue, true active learning acquisition loop, SAM2 runtime backend, and label-quality auditing / second-review recommendation
+- future segmentation work includes a diversity-aware active review queue, true active learning acquisition loop, SAM2 runtime backend, label-quality auditing / second-review recommendation, and a model comparison dashboard
 
 ## Repository Structure
 
@@ -270,6 +270,10 @@ Artifact location:
 - `demo_data/model_state/image_segmentation/placeholder_model.json`
 - `demo_data/model_state/image_segmentation/last_training_dataset.jsonl`
 - `demo_data/model_state/image_segmentation/correction_delta_dataset.jsonl`
+- `demo_data/model_state/image_segmentation/correction_risk/classifier.joblib`
+- `demo_data/model_state/image_segmentation/correction_risk/metadata.json`
+- `demo_data/model_state/image_segmentation/correction_risk/feature_names.json`
+- `demo_data/model_state/image_segmentation/correction_risk/training_dataset.jsonl`
 
 Runtime pre-label backend:
 
@@ -300,7 +304,9 @@ The segmentation backend now attaches lightweight segmentation metadata instrume
 
 When enabled, the MobileSAM-compatible backend can perform prompt-stability uncertainty estimation by perturbing the selected prompt bbox, generating multiple candidate masks, and measuring mask stability through pairwise IoU and disagreement area. The resulting `uncertainty` metadata records fields such as `mean_pairwise_iou`, `min_pairwise_iou`, `disagreement_area_ratio`, `stable`, and `stability_bucket`. This remains lightweight uncertainty instrumentation, not a full active learning loop. Prompt-stability is disabled by default, so normal MobileSAM prediction remains a single-pass inference path unless `IMAGE_SEG_PROMPT_STABILITY_ENABLED=true` is set. SAM2 remains optional/future-ready in this repository; this change does not implement a SAM2 runtime. The metadata is a foundation for future correction-risk learning and active review queues.
 
-The segmentation HITL flow now records model-vs-human correction deltas when human-corrected BrushLabels masks are available. For each paired model prediction and human annotation, the trainer computes IoU, Dice, added/removed area, correction area ratio, bbox alignment, centroid shift, and correction severity. These records are persisted as a JSONL artifact and summarized in segmentation metadata. This does not train a correction-risk model yet; it creates the supervised data foundation for future correction-risk learning.
+The segmentation HITL flow records model-vs-human correction deltas when human-corrected BrushLabels masks are available. For each paired model prediction and human annotation, the trainer computes IoU, Dice, added/removed area, correction area ratio, bbox alignment, centroid shift, and correction severity. These records are persisted as a JSONL artifact and summarized in segmentation metadata. When enough labeled correction delta records exist, they also provide the supervised data for correction-risk training.
+
+The segmentation trainer can train a lightweight correction-risk predictor from the human correction delta dataset. The predictor uses scikit-learn `LogisticRegression` with pre-correction metadata such as mask quality, review flags, prompt/mask geometry, and prompt-stability uncertainty to estimate whether a model-generated mask is likely to require major human correction. It trains only when enough correction delta records and both target classes are present. `scikit-learn` is a required dependency for this correction-risk training path. This does not fine-tune MobileSAM and is not a full active learning loop; it is a lightweight feedback model that can later support active review prioritization.
 
 Optional Docker GPU MobileSAM runtime:
 

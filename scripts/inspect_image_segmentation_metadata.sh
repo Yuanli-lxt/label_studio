@@ -11,6 +11,7 @@ import sys
 
 metadata = json.loads(sys.argv[1])
 corrections = metadata.get("correction_deltas") or {}
+risk = metadata.get("correction_risk") or {}
 
 print("Model version:", metadata.get("model_version"))
 print("Trained at:", metadata.get("trained_at"))
@@ -29,4 +30,23 @@ print("  severity counts:", corrections.get("severity_counts") or {})
 print("  mean model-human IoU:", corrections.get("mean_model_human_iou"))
 print("  mean correction area ratio:", corrections.get("mean_correction_area_ratio"))
 print("  output path:", corrections.get("output_path"))
+
+print("\nCorrection risk")
+print("  status:", risk.get("status"))
+print("  skip reason:", risk.get("skip_reason"))
+print("  usable records:", risk.get("usable_records", 0))
+print("  positive records:", risk.get("positive_records", 0))
+print("  negative records:", risk.get("negative_records", 0))
+print("  model type:", risk.get("model_type"))
+print("  metrics:", risk.get("metrics") or {})
+artifacts = risk.get("training_artifacts") or {}
+print("  classifier:", artifacts.get("classifier_path"))
+print("  metadata:", artifacts.get("metadata_path"))
+print("  feature names:", artifacts.get("feature_names_path"))
+print("  training dataset:", artifacts.get("training_dataset_path"))
+weights = risk.get("feature_weights") or []
+if weights:
+    print("  top feature weights:")
+    for row in weights[:5]:
+        print("   -", row.get("feature"), row.get("weight"))
 PY

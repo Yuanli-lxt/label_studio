@@ -31,6 +31,7 @@ from segmentation_corrections import (  # noqa: E402
     build_segmentation_correction_record_from_task,
     summarize_segmentation_correction_records,
 )
+from segmentation_correction_risk import train_correction_risk_model  # noqa: E402
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "trainer")
 PORT = int(os.getenv("PORT", "9091"))
@@ -98,6 +99,10 @@ _IMAGE_SEG_LAST_DATASET_PATH = os.path.join(
 _IMAGE_SEG_CORRECTION_DELTA_PATH = os.path.join(
     IMAGE_SEG_MODEL_ARTIFACTS_DIR,
     "correction_delta_dataset.jsonl",
+)
+_IMAGE_SEG_CORRECTION_RISK_DIR = os.path.join(
+    IMAGE_SEG_MODEL_ARTIFACTS_DIR,
+    "correction_risk",
 )
 
 # Backward-compatible aliases retained for existing tests/scripts.
@@ -1784,6 +1789,30 @@ def _write_segmentation_correction_delta_dataset(records):
     return summarize_segmentation_correction_records(records, _IMAGE_SEG_CORRECTION_DELTA_PATH)
 
 
+def _train_segmentation_correction_risk(records):
+    try:
+        return train_correction_risk_model(records, _IMAGE_SEG_CORRECTION_RISK_DIR)
+    except Exception as exc:
+        return {
+            "correction_risk": {
+                "enabled": True,
+                "status": "error",
+                "skip_reason": "training_failed",
+                "error": str(exc),
+                "records_total": len(records),
+                "usable_records": 0,
+                "positive_records": 0,
+                "negative_records": 0,
+                "training_artifacts": {
+                    "classifier_path": os.path.join(_IMAGE_SEG_CORRECTION_RISK_DIR, "classifier.joblib"),
+                    "feature_names_path": os.path.join(_IMAGE_SEG_CORRECTION_RISK_DIR, "feature_names.json"),
+                    "metadata_path": os.path.join(_IMAGE_SEG_CORRECTION_RISK_DIR, "metadata.json"),
+                    "training_dataset_path": os.path.join(_IMAGE_SEG_CORRECTION_RISK_DIR, "training_dataset.jsonl"),
+                },
+            }
+        }
+
+
 def _split_dataset_indices(labels, eval_split_ratio, min_eval_samples):
     class_count = len(set(labels))
     total = len(labels)
@@ -2489,6 +2518,10 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
             dataset_file.write(json.dumps(sample, ensure_ascii=False) + "\n")
     correction_records = _segmentation_correction_records_from_samples(samples)
     correction_summary = _write_segmentation_correction_delta_dataset(correction_records)
+    correction_risk_metadata = _train_segmentation_correction_risk(correction_records).get(
+        "correction_risk",
+        {},
+    )
 
     artifact = {
         "model_version": model_version,
@@ -2527,6 +2560,7 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
             "mask_count": len(samples),
         },
         "correction_deltas": correction_summary,
+        "correction_risk": correction_risk_metadata,
         "model_details": {
             "name": "placeholder_center_mask",
             "rle_format": "label_studio_brush",
@@ -2542,6 +2576,7 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
             "metadata_path": _IMAGE_SEG_METADATA_PATH,
             "placeholder_model_path": _IMAGE_SEG_ARTIFACT_PATH,
             "correction_delta_dataset_path": _IMAGE_SEG_CORRECTION_DELTA_PATH,
+            "correction_risk_dir": _IMAGE_SEG_CORRECTION_RISK_DIR,
         },
         "framework": {
             "library": "none",

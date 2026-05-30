@@ -163,6 +163,10 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
                 module._IMAGE_SEG_CORRECTION_DELTA_PATH,
                 metadata["artifacts"]["correction_delta_dataset_path"],
             )
+            self.assertEqual("skipped", metadata["correction_risk"]["status"])
+            self.assertEqual("not_enough_records", metadata["correction_risk"]["skip_reason"])
+            self.assertEqual(0, metadata["correction_risk"]["usable_records"])
+            self.assertIn("training_artifacts", metadata["correction_risk"])
 
     def test_manual_segmentation_sample_falls_back_to_image_path(self):
         with tempfile.TemporaryDirectory() as tmp:
