@@ -167,6 +167,94 @@ class ImageSegmentationTrainingTests(unittest.TestCase):
             self.assertEqual("not_enough_records", metadata["correction_risk"]["skip_reason"])
             self.assertEqual(0, metadata["correction_risk"]["usable_records"])
             self.assertIn("training_artifacts", metadata["correction_risk"])
+            self.assertEqual("skipped", metadata["review_queue"]["status"])
+            self.assertEqual("no_review_candidates", metadata["review_queue"]["skip_reason"])
+            self.assertTrue(Path(module._IMAGE_SEG_REVIEW_QUEUE_PATH).exists())
+
+    def test_train_placeholder_segmentation_generates_review_queue_for_correction_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            module = self._module(tmp_dir)
+            valid_path = str(ROOT / "demo_data" / "local-files" / "images" / "demo_blue.png")
+
+            def correction(task_id, risk_like):
+                return {
+                    "record_status": "ok",
+                    "task_id": task_id,
+                    "image": "/data/local-files/?d=images/demo_blue.png",
+                    "prediction_id": task_id + 100,
+                    "model_version": "mobilesam-seg-v0001",
+                    "label": "Object",
+                    "image_width": 320,
+                    "image_height": 240,
+                    "prompt_bbox": [80, 60, 240, 180],
+                    "model_mask_bbox": [82, 62, 238, 178],
+                    "mask_quality": {
+                        "mask_area_ratio": 0.35 if risk_like else 0.08,
+                        "bbox_iou_prompt_mask": 0.3 if risk_like else 0.9,
+                        "mask_touches_border": risk_like,
+                        "valid_mask": True,
+                        "rle_length": 120,
+                    },
+                    "review": {
+                        "needs_review": risk_like,
+                        "review_priority": "high" if risk_like else "low",
+                        "review_priority_score": 90 if risk_like else 0,
+                        "review_reason": ["low_prompt_mask_bbox_iou"] if risk_like else [],
+                    },
+                    "uncertainty": {
+                        "enabled": True,
+                        "mean_pairwise_iou": 0.4 if risk_like else 0.95,
+                        "min_pairwise_iou": 0.2 if risk_like else 0.9,
+                        "disagreement_area_ratio": 0.2 if risk_like else 0.01,
+                        "stable": not risk_like,
+                        "stability_bucket": "low" if risk_like else "high",
+                        "reason": ["unstable_masks"] if risk_like else [],
+                    },
+                    "delta": {"major_correction": risk_like, "correction_severity": "major" if risk_like else "none"},
+                }
+
+            samples = [
+                {
+                    "image": "/data/local-files/?d=images/demo_blue.png",
+                    "image_path": valid_path,
+                    "label": "Object",
+                    "rle": [0, 1, 2, 3],
+                    "original_width": 320,
+                    "original_height": 240,
+                    "task_id": 1,
+                    "annotation_id": 11,
+                    "source": "test",
+                    "correction_delta": correction(1, True),
+                },
+                {
+                    "image": "/data/local-files/?d=images/demo_blue.png",
+                    "image_path": valid_path,
+                    "label": "Object",
+                    "rle": [0, 1, 2, 3],
+                    "original_width": 320,
+                    "original_height": 240,
+                    "task_id": 2,
+                    "annotation_id": 12,
+                    "source": "test",
+                    "correction_delta": correction(2, False),
+                },
+            ]
+
+            metadata = module._train_placeholder_image_segmentation(samples, training_run=4)
+            queue_path = Path(module._IMAGE_SEG_REVIEW_QUEUE_PATH)
+            rows = [json.loads(line) for line in queue_path.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual("generated", metadata["review_queue"]["status"])
+            self.assertEqual(module._IMAGE_SEG_REVIEW_QUEUE_PATH, metadata["review_queue"]["output_path"])
+            self.assertEqual(module._IMAGE_SEG_REVIEW_QUEUE_PATH, metadata["artifacts"]["review_queue_path"])
+            self.assertEqual(2, metadata["review_queue"]["records_scored"])
+            self.assertEqual(2, len(rows))
+            self.assertEqual([1, 2], [row["rank"] for row in rows])
+            self.assertIn("priority_score", rows[0])
+            self.assertIn("score_components", rows[0])
+            self.assertIn("review_reasons", rows[0])
+            self.assertIn("source_metadata", rows[0])
 
     def test_manual_segmentation_sample_falls_back_to_image_path(self):
         with tempfile.TemporaryDirectory() as tmp:

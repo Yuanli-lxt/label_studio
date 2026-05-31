@@ -1,25 +1,121 @@
-# Label Platform (Phase 4 Text + Image Classifiers)
+# Label Platform
 
-This repository is a local-first model-assisted annotation demo built on **Label Studio OSS**.
+This repository is a local-first model-in-the-loop AI annotation platform integrating **Label Studio OSS** with Dockerized ML backends for model-assisted labeling, segmentation quality instrumentation, prompt-stability uncertainty, human correction delta tracking, and lightweight correction-risk learning.
+
+The project includes separate paths for text classification, image classification, and image segmentation HITL. MobileSAM is the validated segmentation runtime for SAM-compatible mask pre-labeling; SAM2 is only future-ready wording in this repository and is not implemented.
+
+## Project Highlights
+
+- Local-first Label Studio OSS annotation platform with Dockerized ML services.
+- Model-assisted text classification, image classification, and image segmentation workflows.
+- MobileSAM-compatible segmentation backend with Label Studio BrushLabels/RLE output.
+- Segmentation quality metadata for mask area, bbox alignment, RLE validity, and review flags.
+- Prompt-stability uncertainty estimation by perturbing bbox prompts and measuring mask agreement.
+- Human correction delta dataset comparing model-generated masks with human-edited masks.
+- Lightweight scikit-learn correction-risk predictor trained from human correction deltas when enough data exists.
+- Active-review queue generation that ranks segmentation samples with correction risk, uncertainty, quality flags, geometry heuristics, and lightweight diversity signals.
+- Reproducible smoke tests and validation gates for backend health, metadata, artifacts, and prediction formats.
+
+## Implemented vs Future Work
 
 Implemented:
-- Phase 1: local runtime stack
-- Phase 2: image/text pre-annotation demo
-- Phase 3: minimal HITL retrain loop + persistent state
-- Phase 4: real trainable text classification (`scikit-learn` TF-IDF + LogisticRegression)
-- Phase 4 extension: real trainable image classification (`scikit-learn` + lightweight image features)
-- Image segmentation HITL: MobileSAM/placeholder pre-labels, BrushLabels/RLE output, mask quality metadata, opt-in prompt-stability uncertainty metadata, human correction delta dataset, and lightweight correction-risk predictor when enough correction data exists
+- Local Label Studio OSS stack
+- Dockerized ML backend and trainer service
+- Text classification training/evaluation path
+- Image classification training/evaluation path
+- Image segmentation HITL workflow
+- MobileSAM-compatible segmentation backend
+- BrushLabels/RLE mask output
+- Docker MobileSAM smoke validation
+- Segmentation quality metadata
+- Prompt-stability uncertainty instrumentation when enabled
+- Human correction delta dataset
+- scikit-learn correction-risk predictor when enough correction data exists
+- Active-review queue generation for segmentation review prioritization
 
-Current tuning pass focus:
-- improved text-classification dataset quality checks
-- improved evaluation and inspectability metadata
-- clearer prediction confidence/uncertainty output
+Future work:
+- True active learning acquisition loop
+- Automatic Label Studio task import for selected review items
+- Diversity-aware sampling with learned embeddings
+- Label-quality auditing / second-review recommendation
+- SAM2 runtime backend
+- Model comparison dashboard
+- Multi-class segmentation
+- Larger-scale annotation operations
 
-Still intentionally demo-level:
-- image detection and text NER remain deterministic rule-based
-- no heavy training infrastructure
-- no active learning automation
-- future segmentation work includes a diversity-aware active review queue, true active learning acquisition loop, SAM2 runtime backend, label-quality auditing / second-review recommendation, and a model comparison dashboard
+## Image Segmentation Benchmark v0.1
+
+Benchmark v0.1 evaluates whether the Layer 1-5 segmentation feedback loop finds likely major corrections better than random review. The MVP supports COCO val2017 only. It downloads only COCO `val2017` images plus `instances_val2017.json`, not the full COCO 2017 train/test corpus.
+
+Prepare local data explicitly:
+
+```bash
+python -m image_segmentation.benchmark.download_data \
+  --dataset coco_val2017 \
+  --output-dir data/external
+```
+
+Data is stored under:
+
+```text
+data/external/coco/
+  val2017/
+  annotations/instances_val2017.json
+```
+
+Run preflight without downloading anything implicitly:
+
+```bash
+python -m image_segmentation.benchmark.preflight \
+  --config configs/benchmark_v0_1.coco.yaml
+```
+
+Build a manifest:
+
+```bash
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.coco.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_manifest.jsonl
+```
+
+Run the benchmark:
+
+```bash
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1 \
+  --backend mobile_sam_or_existing_backend \
+  --enable-prompt-stability false \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk
+```
+
+Outputs:
+- `predictions.jsonl`: model pre-label masks with Layer 1 quality/review metadata and optional Layer 2 uncertainty.
+- `correction_delta_dataset.jsonl`: model-vs-COCO-GT correction deltas, marked as `public_gt_simulated_human_annotation`.
+- `review_queue.jsonl`: Layer 5 priority queue with delta only in `evaluation_only`.
+- `evaluation_report.json` and `evaluation_report.md`: machine and human-readable metrics.
+
+Report metrics:
+- model/GT IoU, Dice, precision, and recall measure pre-label mask quality against public ground truth.
+- major correction rate and severity distribution summarize how often simulated human correction is substantial.
+- grouped dataset/tag metrics show behavior on small, border-touching, elongated, or crowded cases.
+- precision@10/20% and recall@10/20% measure how many major corrections are found near the top of the review queue.
+- lift@10/20% compares full Layer 5 priority against the random baseline major-correction rate.
+- average precision summarizes ranking quality over all major-correction samples.
+
+Current limitations and TODO:
+- COCO val2017 is the only fully implemented dataset loader.
+- LVIS, DIS5K, COD10K, CAMO, and Open Images are scaffolded for later loaders.
+- COCO has no explicit low-contrast, occlusion, or truncation metadata in this MVP.
+- Placeholder backend remains a deterministic fallback; MobileSAM requires the existing backend dependencies/checkpoints.
+
+Boundaries:
+- This is not a production-grade active learning platform yet.
+- The review queue does not automatically modify Label Studio tasks or retrain models.
+- It does not fine-tune MobileSAM.
+- It does not implement SAM2.
+- It does not automatically determine label correctness.
+- Image detection and text NER remain deterministic rule-based demo paths.
 
 ## Repository Structure
 
@@ -258,6 +354,57 @@ Trainer/ML model metadata endpoints:
 - `http://localhost:9091/models/image-classification/current`
 - `http://localhost:9090/models/image-classification/current`
 
+## Model-in-the-loop Segmentation Feedback Pipeline
+
+The image segmentation path is structured as an inspectable feedback pipeline around Label Studio BrushLabels/RLE masks and MobileSAM-compatible pre-labels.
+
+```text
+Image task + bbox prompt
+        ↓
+Dockerized MobileSAM backend
+        ↓
+BrushLabels/RLE pre-label
+        ↓
+Layer 1: mask_quality + review metadata
+        ↓
+Layer 2: prompt-stability uncertainty, optional
+        ↓
+Human review/correction in Label Studio
+        ↓
+Layer 3: model-vs-human correction delta dataset
+        ↓
+Layer 4: correction-risk predictor
+        ↓
+Future: active review queue / active learning loop
+```
+
+Layer 1: Segmentation quality metadata
+- Adds `mask_quality` and `review` metadata to BrushLabels/RLE predictions.
+- Captures mask area, prompt bbox, mask bbox, bbox IoU, RLE length, border touching, and review flags.
+
+Layer 2: Prompt-stability uncertainty
+- Optional and disabled by default.
+- Perturbs bbox prompts, runs the SAM-compatible backend over variants, computes pairwise mask IoU and disagreement area, and stores `uncertainty` metadata.
+
+Layer 3: Human correction delta dataset
+- Compares model-generated masks against human-corrected Label Studio annotations.
+- Computes IoU, Dice, added/removed area, correction area ratio, bbox alignment, centroid shift, and correction severity.
+- Persists `correction_delta_dataset.jsonl` and summarizes correction deltas in segmentation metadata.
+
+Layer 4: Learned correction-risk predictor
+- Uses scikit-learn `LogisticRegression`.
+- Trains only when enough correction delta records exist.
+- Uses pre-correction features from `mask_quality`, `review`, `uncertainty`, and geometry metadata.
+- Predicts whether a pre-label is likely to require major human correction.
+- Avoids target leakage by not using `delta` metrics as input features.
+
+Layer 5: Active-review queue
+- Combines correction-risk predictions, prompt-stability uncertainty, mask quality review flags, geometry heuristics, and a lightweight diversity signal.
+- Produces ranked JSONL records with score components, review reasons, source metadata, and evaluation-only deltas.
+- Does not modify Label Studio tasks, sample from an unlabeled pool, or retrain models from the queue.
+
+This is active-learning-style review prioritization, not a full active learning acquisition loop.
+
 ## Image Segmentation HITL (SAM/MobileSAM Optional)
 
 Image segmentation has a first-version Brush/mask human-review loop. It uses a single foreground label, `Object`, and keeps the Label Studio -> prediction -> human correction -> webhook -> training data -> retrain -> new pre-label contract testable. By default it uses the deterministic placeholder mask; set `IMAGE_SEG_BACKEND` to use a real SAM-compatible image backend for pre-labels.
@@ -274,6 +421,7 @@ Artifact location:
 - `demo_data/model_state/image_segmentation/correction_risk/metadata.json`
 - `demo_data/model_state/image_segmentation/correction_risk/feature_names.json`
 - `demo_data/model_state/image_segmentation/correction_risk/training_dataset.jsonl`
+- `demo_data/model_state/image_segmentation/review_queue.jsonl`
 
 Runtime pre-label backend:
 
@@ -307,6 +455,8 @@ When enabled, the MobileSAM-compatible backend can perform prompt-stability unce
 The segmentation HITL flow records model-vs-human correction deltas when human-corrected BrushLabels masks are available. For each paired model prediction and human annotation, the trainer computes IoU, Dice, added/removed area, correction area ratio, bbox alignment, centroid shift, and correction severity. These records are persisted as a JSONL artifact and summarized in segmentation metadata. When enough labeled correction delta records exist, they also provide the supervised data for correction-risk training.
 
 The segmentation trainer can train a lightweight correction-risk predictor from the human correction delta dataset. The predictor uses scikit-learn `LogisticRegression` with pre-correction metadata such as mask quality, review flags, prompt/mask geometry, and prompt-stability uncertainty to estimate whether a model-generated mask is likely to require major human correction. It trains only when enough correction delta records and both target classes are present. `scikit-learn` is a required dependency for this correction-risk training path. This does not fine-tune MobileSAM and is not a full active learning loop; it is a lightweight feedback model that can later support active review prioritization.
+
+The segmentation trainer can now generate an active-review queue from existing prediction and feedback metadata. The queue combines correction-risk predictions, prompt-stability uncertainty, mask quality review flags, geometry heuristics, and a lightweight diversity signal to rank segmentation samples for human review. This is active-learning-style review prioritization, not a full active learning acquisition loop: it does not automatically sample from an unlabeled pool, modify Label Studio tasks, or retrain models from the queue. The queue is persisted to `demo_data/model_state/image_segmentation/review_queue.jsonl` and summarized in `metadata.json` under `review_queue`.
 
 Optional Docker GPU MobileSAM runtime:
 

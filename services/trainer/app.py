@@ -31,7 +31,8 @@ from segmentation_corrections import (  # noqa: E402
     build_segmentation_correction_record_from_task,
     summarize_segmentation_correction_records,
 )
-from segmentation_correction_risk import train_correction_risk_model  # noqa: E402
+from segmentation_correction_risk import predict_correction_risk, train_correction_risk_model  # noqa: E402
+from segmentation_review_queue import build_segmentation_review_queue  # noqa: E402
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "trainer")
 PORT = int(os.getenv("PORT", "9091"))
@@ -103,6 +104,10 @@ _IMAGE_SEG_CORRECTION_DELTA_PATH = os.path.join(
 _IMAGE_SEG_CORRECTION_RISK_DIR = os.path.join(
     IMAGE_SEG_MODEL_ARTIFACTS_DIR,
     "correction_risk",
+)
+_IMAGE_SEG_REVIEW_QUEUE_PATH = os.path.join(
+    IMAGE_SEG_MODEL_ARTIFACTS_DIR,
+    "review_queue.jsonl",
 )
 
 # Backward-compatible aliases retained for existing tests/scripts.
@@ -1813,6 +1818,46 @@ def _train_segmentation_correction_risk(records):
         }
 
 
+def _generate_segmentation_review_queue(records, correction_risk_metadata):
+    try:
+        queue_records = _segmentation_review_records_with_risk(records, correction_risk_metadata)
+        return build_segmentation_review_queue(queue_records, _IMAGE_SEG_REVIEW_QUEUE_PATH)
+    except Exception as exc:
+        return {
+            "review_queue": {
+                "enabled": True,
+                "status": "error",
+                "skip_reason": "generation_failed",
+                "error": str(exc),
+                "records_total": len(records),
+                "records_scored": 0,
+                "records_skipped": len(records),
+                "output_path": _IMAGE_SEG_REVIEW_QUEUE_PATH,
+            },
+            "items": [],
+        }
+
+
+def _segmentation_review_records_with_risk(records, correction_risk_metadata):
+    risk = correction_risk_metadata if isinstance(correction_risk_metadata, dict) else {}
+    if risk.get("status") != "trained":
+        return list(records)
+    enriched = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        row = dict(record)
+        try:
+            row["correction_risk"] = predict_correction_risk(record, _IMAGE_SEG_CORRECTION_RISK_DIR).get(
+                "correction_risk",
+                {},
+            )
+        except Exception:
+            pass
+        enriched.append(row)
+    return enriched
+
+
 def _split_dataset_indices(labels, eval_split_ratio, min_eval_samples):
     class_count = len(set(labels))
     total = len(labels)
@@ -2522,6 +2567,10 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
         "correction_risk",
         {},
     )
+    review_queue_summary = _generate_segmentation_review_queue(
+        correction_records,
+        correction_risk_metadata,
+    ).get("review_queue", {})
 
     artifact = {
         "model_version": model_version,
@@ -2561,6 +2610,7 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
         },
         "correction_deltas": correction_summary,
         "correction_risk": correction_risk_metadata,
+        "review_queue": review_queue_summary,
         "model_details": {
             "name": "placeholder_center_mask",
             "rle_format": "label_studio_brush",
@@ -2577,6 +2627,7 @@ def _train_placeholder_image_segmentation(samples, training_run, dataset_context
             "placeholder_model_path": _IMAGE_SEG_ARTIFACT_PATH,
             "correction_delta_dataset_path": _IMAGE_SEG_CORRECTION_DELTA_PATH,
             "correction_risk_dir": _IMAGE_SEG_CORRECTION_RISK_DIR,
+            "review_queue_path": _IMAGE_SEG_REVIEW_QUEUE_PATH,
         },
         "framework": {
             "library": "none",

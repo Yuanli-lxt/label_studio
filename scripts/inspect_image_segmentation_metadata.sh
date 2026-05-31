@@ -12,6 +12,7 @@ import sys
 metadata = json.loads(sys.argv[1])
 corrections = metadata.get("correction_deltas") or {}
 risk = metadata.get("correction_risk") or {}
+queue = metadata.get("review_queue") or {}
 
 print("Model version:", metadata.get("model_version"))
 print("Trained at:", metadata.get("trained_at"))
@@ -49,4 +50,21 @@ if weights:
     print("  top feature weights:")
     for row in weights[:5]:
         print("   -", row.get("feature"), row.get("weight"))
+
+print("\nReview queue")
+print("  status:", queue.get("status"))
+print("  skip reason:", queue.get("skip_reason"))
+print("  output path:", queue.get("output_path"))
+print("  records scored:", queue.get("records_scored", 0))
+print("  records skipped:", queue.get("records_skipped", 0))
+print("  priority buckets:", queue.get("priority_bucket_counts") or {})
+print("  mean priority score:", queue.get("mean_priority_score"))
+print("  max priority score:", queue.get("max_priority_score"))
+print("  score weights:", queue.get("score_weights") or {})
+print("  correction risk available:", queue.get("correction_risk_available"))
+reason_counts = queue.get("reason_counts") or {}
+if reason_counts:
+    print("  top reason counts:")
+    for key, value in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))[:8]:
+        print("   -", key, value)
 PY

@@ -1,0 +1,31 @@
+benchmark_id: benchmark_v0_1
+random_seed: 42
+max_samples_total: 20
+
+datasets:
+  coco:
+    enabled: true
+    images_dir: data/external/coco/val2017
+    annotations_file: data/external/coco/annotations/instances_val2017.json
+    max_samples: 20
+
+  lvis:
+    enabled: false
+
+  dis5k:
+    enabled: false
+
+  cod10k:
+    enabled: false
+
+  camo:
+    enabled: false
+
+sampling:
+  strategy: stratified
+  category_balance: true
+  include_tags:
+    - small_object
+    - touches_border
+    - elongated_object
+    - crowded_or_multi_instance

@@ -17,9 +17,12 @@ demo_data/model_state/training_events.jsonl
 demo_data/model_state/text_classifier/
 demo_data/model_state/image_classifier/
 demo_data/
+demo_data/model_state/image_segmentation/benchmark/
 
 # Local model weights and downloaded checkpoints
 models/
+data/external/
+*.zip
 *.pt
 *.pth
 *.ckpt
