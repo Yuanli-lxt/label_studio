@@ -636,6 +636,134 @@ Read the result conservatively. Prefer at least 30 positives, and 50 is better. 
 
 Do not tune Layer 5 weights before COCO1000 OOF evidence. Do not use evaluation diagnostics for ranking, risk-model features, or manifest sampling. Do not auto-download data for this validation path.
 
+## Running COCO1000 MobileSAM On GPU
+
+Use GPU for the MobileSAM COCO1000 benchmark. CPU execution can be impractically slow.
+
+```bash
+export IMAGE_SEG_BACKEND=mobilesam
+export IMAGE_SEG_CHECKPOINT=/home/yuanli/projects/label-platform/models/mobilesam/mobile_sam.pt
+export IMAGE_SEG_DEVICE=cuda
+export CUDA_VISIBLE_DEVICES=0
+```
+
+Preflight the backend before running the benchmark:
+
+```bash
+python -m image_segmentation.benchmark.preflight_backend \
+  --backend mobile_sam \
+  --checkpoint /home/yuanli/projects/label-platform/models/mobilesam/mobile_sam.pt \
+  --device cuda
+```
+
+If CUDA is unavailable, `resolved_device` is not `cuda`, or the model falls back to CPU, stop and fix the environment before continuing. Do not accept placeholder, bbox-rect, or silent CPU fallback for this validation.
+
+Run the COCO100 sanity benchmark first:
+
+```bash
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.coco100.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco100_manifest.jsonl \
+  --summary-output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco100_manifest_summary.json
+
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco100_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco100_mobile_sam_gpu \
+  --backend mobile_sam \
+  --enable-prompt-stability false \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk \
+  --resume true
+```
+
+Then run COCO300:
+
+```bash
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.coco300.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco300_manifest.jsonl \
+  --summary-output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco300_manifest_summary.json
+
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco300_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco300_mobile_sam_gpu \
+  --backend mobile_sam \
+  --enable-prompt-stability false \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk \
+  --resume true
+```
+
+Finally run COCO1000 with resume:
+
+```bash
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu \
+  --backend mobile_sam \
+  --enable-prompt-stability false \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk \
+  --resume true
+```
+
+Runtime details are written to `runtime_metadata.json` in each benchmark output directory. It records requested/resolved device, CUDA availability, GPU name, elapsed time, seconds/sample, resume count, and peak CUDA memory.
+
+Run OOF evaluation after COCO1000 finishes:
+
+```bash
+python -m image_segmentation.benchmark.crossfit_risk_evaluation \
+  --delta-dataset demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu/correction_delta_dataset.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof \
+  --n-splits 5 \
+  --random-seed 42 \
+  --bootstrap-iters 1000
+```
+
+Keep `--enable-prompt-stability false` for COCO1000. Do not tune Layer 5 weights before reviewing the COCO1000 OOF evidence.
+
+## Layer 5 Weight Ablation
+
+COCO1000 OOF showed that `full_priority` is effective, but `correction_risk_only` was stronger. Weight ablation checks whether the current Layer 5 fusion is diluting the risk signal without rerunning MobileSAM or retraining the risk model.
+
+Run COCO1000 OOF weight ablation:
+
+```bash
+python -m image_segmentation.benchmark.ablate_review_weights \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof/oof_review_queue.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof_weight_ablation \
+  --bootstrap-iters 1000 \
+  --random-seed 42
+```
+
+The command writes:
+- `weight_ablation.json`
+- `weight_ablation.md`
+- `preset_rankings/*.review_queue.jsonl`
+
+Interpretation:
+- `current_full_priority` is the current behavior and remains the default.
+- `risk_only` being best means the learned correction-risk signal dominates this split.
+- `risk_heavy` close to `risk_only` and above current may be a better engineering compromise because it keeps quality, uncertainty, geometry, and diversity in the score.
+- `uncertainty_heavy` should only be interpreted on runs that include uncertainty metadata.
+
+Run COCO300 uncertainty sanity:
+
+```bash
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco300_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco300_mobile_sam_uncertainty_gpu \
+  --backend mobile_sam \
+  --enable-prompt-stability true \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk \
+  --resume true
+
+python -m image_segmentation.benchmark.ablate_review_weights \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco300_mobile_sam_uncertainty_gpu/review_queue.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco300_mobile_sam_uncertainty_gpu_weight_ablation \
+  --bootstrap-iters 1000 \
+  --random-seed 42
+```
+
+Experimental presets live in `configs/review_weight_presets.yaml`. The review queue can load a preset with `IMAGE_SEG_REVIEW_WEIGHT_PRESET` and `IMAGE_SEG_REVIEW_WEIGHT_PRESETS_FILE`, but do not replace the default before validating on a second dataset or another run. COCO is broad but may not reflect harder segmentation datasets such as LVIS, DIS5K, or COD10K.
+
 ## Tests
 
 ```bash

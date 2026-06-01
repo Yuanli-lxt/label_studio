@@ -38,7 +38,84 @@ class BenchmarkBackendPreflightTests(unittest.TestCase):
         self.assertIn("device", result)
         self.assertIn("model_class", result)
 
+    def test_preflight_backend_cuda_unavailable_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "mobile_sam.pt"
+            checkpoint.write_bytes(b"fake")
+            with patch("image_segmentation.benchmark.preflight_backend._dependency_error", return_value=None), patch(
+                "image_segmentation.benchmark.preflight_backend._device_info",
+                return_value={
+                    "requested_device": "cuda",
+                    "resolved_device": None,
+                    "cuda_available": False,
+                    "cuda_device_name": None,
+                    "cuda_memory": None,
+                    "error": "IMAGE_SEG_DEVICE=cuda was requested, but torch.cuda.is_available() is false",
+                },
+            ):
+                result = preflight_backend("mobile_sam", checkpoint=str(checkpoint), device="cuda")
+        self.assertEqual("failed", result["status"])
+        self.assertIn("torch.cuda.is_available() is false", result["error"])
+
+    def test_preflight_backend_reports_resolved_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "mobile_sam.pt"
+            checkpoint.write_bytes(b"fake")
+            with patch("image_segmentation.benchmark.preflight_backend._dependency_error", return_value=None), patch(
+                "image_segmentation.benchmark.preflight_backend._device_info",
+                return_value={
+                    "requested_device": "cuda",
+                    "resolved_device": "cuda",
+                    "cuda_available": True,
+                    "cuda_device_name": "Fake GPU",
+                    "cuda_memory": {"total_memory": 1, "allocated": 0, "reserved": 0},
+                    "error": None,
+                },
+            ):
+                result = preflight_backend(
+                    "mobile_sam",
+                    checkpoint=str(checkpoint),
+                    device="cuda",
+                    construct_predictor=False,
+                )
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("cuda", result["requested_device"])
+        self.assertEqual("cuda", result["resolved_device"])
+        self.assertTrue(result["cuda_available"])
+
+    def test_mobile_sam_no_silent_cpu_fallback_when_cuda_requested(self):
+        class Param:
+            device = "cpu"
+
+        class Model:
+            def parameters(self):
+                return iter([Param()])
+
+        class Predictor:
+            model = Model()
+
+        class App:
+            def _load_image_segmentation_predictor(self, backend):
+                return {"predictor": Predictor()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "mobile_sam.pt"
+            checkpoint.write_bytes(b"fake")
+            with patch("image_segmentation.benchmark.preflight_backend._dependency_error", return_value=None), patch(
+                "image_segmentation.benchmark.preflight_backend._device_info",
+                return_value={
+                    "requested_device": "cuda",
+                    "resolved_device": "cuda",
+                    "cuda_available": True,
+                    "cuda_device_name": "Fake GPU",
+                    "cuda_memory": {"total_memory": 1, "allocated": 0, "reserved": 0},
+                    "error": None,
+                },
+            ), patch("image_segmentation.benchmark.preflight_backend._load_backend_app", return_value=App()):
+                result = preflight_backend("mobile_sam", checkpoint=str(checkpoint), device="cuda")
+        self.assertEqual("failed", result["status"])
+        self.assertIn("not on cuda", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

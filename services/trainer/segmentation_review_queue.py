@@ -13,6 +13,7 @@ DEFAULT_SCORE_WEIGHTS = {
     "geometry_complexity_score": 0.10,
     "diversity_score": 0.10,
 }
+DEFAULT_REVIEW_WEIGHT_PRESET = "current"
 
 REVIEW_PRIORITY_LEVELS = {"low": 0.0, "medium": 0.5, "high": 1.0}
 STABILITY_BUCKET_SCORES = {"unknown": 0.0, "high": 0.0, "medium": 0.5, "low": 1.0}
@@ -40,8 +41,10 @@ def score_review_candidate(
     record: dict,
     correction_risk: Optional[dict] = None,
     weights: Optional[dict] = None,
+    weight_preset: Optional[str] = None,
+    weight_presets_file: Optional[str] = None,
 ) -> dict:
-    score_weights = _score_weights(weights)
+    score_weights, preset_name = _resolve_score_weights(weights, weight_preset, weight_presets_file)
     correction_risk = correction_risk if isinstance(correction_risk, dict) else _record_correction_risk(record)
     components = {
         "correction_risk_score": _correction_risk_score(correction_risk),
@@ -51,7 +54,7 @@ def score_review_candidate(
         "diversity_score": 0.0,
     }
     reasons = _review_reasons(record, correction_risk, components)
-    return _queue_item(record, correction_risk, components, score_weights, reasons)
+    return _queue_item(record, correction_risk, components, score_weights, reasons, preset_name)
 
 
 def build_segmentation_review_queue(
@@ -59,9 +62,11 @@ def build_segmentation_review_queue(
     output_path: str,
     max_items: Optional[int] = None,
     weights: Optional[dict] = None,
+    weight_preset: Optional[str] = None,
+    weight_presets_file: Optional[str] = None,
 ) -> dict:
     rows = [row for row in records if isinstance(row, dict)]
-    score_weights = _score_weights(weights)
+    score_weights, preset_name = _resolve_score_weights(weights, weight_preset, weight_presets_file)
     if not rows:
         summary = _summary(
             status="skipped",
@@ -71,6 +76,7 @@ def build_segmentation_review_queue(
             records_skipped=0,
             output_path=output_path,
             score_weights=score_weights,
+            weight_preset=preset_name,
             items=[],
         )
         _write_queue(output_path, [])
@@ -82,7 +88,7 @@ def build_segmentation_review_queue(
         if record.get("record_status") == "skipped" and not record.get("mask_quality") and not record.get("review"):
             skipped += 1
             continue
-        item = score_review_candidate(record, weights=score_weights)
+        item = score_review_candidate(record, weights=score_weights, weight_preset=preset_name)
         item["_input_index"] = index
         item["_diversity_bin"] = _diversity_bin(record, item)
         scored.append(item)
@@ -102,6 +108,7 @@ def build_segmentation_review_queue(
         records_skipped=skipped + max(0, len(scored) - len(selected)),
         output_path=output_path,
         score_weights=score_weights,
+        weight_preset=preset_name,
         items=selected,
     )
     return {"review_queue": summary, "items": selected}
@@ -146,7 +153,14 @@ def _apply_diversity_order(items: list[dict], weights: dict, max_items: Optional
     return selected
 
 
-def _queue_item(record: dict, correction_risk: dict, components: dict, weights: dict, reasons: list[str]) -> dict:
+def _queue_item(
+    record: dict,
+    correction_risk: dict,
+    components: dict,
+    weights: dict,
+    reasons: list[str],
+    weight_preset: str = DEFAULT_REVIEW_WEIGHT_PRESET,
+) -> dict:
     priority = _weighted_score(components, weights)
     return {
         "rank": None,
@@ -159,6 +173,8 @@ def _queue_item(record: dict, correction_risk: dict, components: dict, weights: 
         "label": record.get("label") or "Object",
         "priority_score": priority,
         "priority_bucket": _priority_bucket(priority),
+        "review_weight_preset": weight_preset,
+        "review_weight_weights": weights,
         "score_components": components,
         "review_reasons": reasons,
         "source_metadata": {
@@ -181,6 +197,7 @@ def _summary(
     records_skipped: int,
     output_path: str,
     score_weights: dict,
+    weight_preset: str,
     items: list[dict],
 ) -> dict:
     scores = [float(item.get("priority_score", 0.0)) for item in items]
@@ -201,6 +218,7 @@ def _summary(
         "records_skipped": records_skipped,
         "output_path": output_path,
         "score_weights": score_weights,
+        "review_weight_preset": weight_preset,
         "priority_bucket_counts": bucket_counts,
         "mean_priority_score": (sum(scores) / len(scores)) if scores else None,
         "max_priority_score": max(scores) if scores else None,
@@ -344,6 +362,41 @@ def _score_weights(weights: Optional[dict]) -> dict:
     if total <= 0:
         return dict(DEFAULT_SCORE_WEIGHTS)
     return {key: value / total for key, value in raw.items()}
+
+
+def _resolve_score_weights(
+    weights: Optional[dict],
+    weight_preset: Optional[str],
+    weight_presets_file: Optional[str],
+) -> tuple[dict, str]:
+    env_preset = os.getenv("IMAGE_SEG_REVIEW_WEIGHT_PRESET")
+    env_file = os.getenv("IMAGE_SEG_REVIEW_WEIGHT_PRESETS_FILE")
+    preset_name = weight_preset or env_preset or DEFAULT_REVIEW_WEIGHT_PRESET
+    if weights is not None:
+        return _score_weights(weights), preset_name
+    if preset_name in {"", "current", DEFAULT_REVIEW_WEIGHT_PRESET}:
+        return _score_weights(None), DEFAULT_REVIEW_WEIGHT_PRESET
+    presets = _load_weight_presets(weight_presets_file or env_file)
+    preset = presets.get(preset_name)
+    if not isinstance(preset, dict):
+        raise ValueError(f"unknown review weight preset: {preset_name}")
+    return _score_weights(preset), preset_name
+
+
+def _load_weight_presets(path: Optional[str]) -> dict:
+    if not path:
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    try:
+        import yaml
+
+        data = yaml.safe_load(text)
+    except Exception:
+        data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("review weight presets file must contain a mapping")
+    return data
 
 
 def _record_correction_risk(record: dict) -> dict:

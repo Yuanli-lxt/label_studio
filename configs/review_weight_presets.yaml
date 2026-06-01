@@ -1,0 +1,52 @@
+current_full_priority:
+  description: Use existing priority_score from review_queue; do not recompute.
+  use_existing_priority_score: true
+
+risk_only:
+  correction_risk_score: 1.0
+  uncertainty_score: 0.0
+  rule_review_score: 0.0
+  geometry_complexity_score: 0.0
+  diversity_score: 0.0
+
+risk_heavy:
+  correction_risk_score: 0.65
+  uncertainty_score: 0.10
+  rule_review_score: 0.10
+  geometry_complexity_score: 0.10
+  diversity_score: 0.05
+
+risk_dominant:
+  correction_risk_score: 0.80
+  uncertainty_score: 0.05
+  rule_review_score: 0.05
+  geometry_complexity_score: 0.05
+  diversity_score: 0.05
+
+uncertainty_heavy:
+  correction_risk_score: 0.35
+  uncertainty_score: 0.35
+  rule_review_score: 0.10
+  geometry_complexity_score: 0.10
+  diversity_score: 0.10
+
+quality_heavy:
+  correction_risk_score: 0.35
+  uncertainty_score: 0.10
+  rule_review_score: 0.30
+  geometry_complexity_score: 0.15
+  diversity_score: 0.10
+
+no_diversity:
+  correction_risk_score: 0.55
+  uncertainty_score: 0.15
+  rule_review_score: 0.15
+  geometry_complexity_score: 0.15
+  diversity_score: 0.0
+
+balanced_no_risk:
+  correction_risk_score: 0.0
+  uncertainty_score: 0.25
+  rule_review_score: 0.30
+  geometry_complexity_score: 0.25
+  diversity_score: 0.20

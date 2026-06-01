@@ -282,6 +282,56 @@ class BenchmarkRunSafetyTests(unittest.TestCase):
             ]:
                 self.assertTrue((out / name).exists(), name)
 
+    def test_runtime_metadata_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = write_manifest(root)
+            out = root / "out"
+            run_benchmark(str(manifest), str(out), backend="bbox_rect")
+            self.assertTrue((out / "runtime_metadata.json").exists())
+            payload = json.loads((out / "runtime_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(1, payload["n_samples_completed"])
+            self.assertIn("elapsed_seconds", payload)
+
+    def test_runtime_metadata_contains_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = write_manifest(root)
+            out = root / "out"
+            with patch(
+                "image_segmentation.benchmark.run_benchmark._runtime_device_info",
+                return_value={
+                    "requested_device": "cuda",
+                    "resolved_device": "cuda",
+                    "cuda_available": True,
+                    "cuda_device_name": "Fake GPU",
+                },
+            ):
+                run_benchmark(str(manifest), str(out), backend="bbox_rect")
+            payload = json.loads((out / "runtime_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual("cuda", payload["requested_device"])
+            self.assertEqual("cuda", payload["resolved_device"])
+            self.assertEqual("Fake GPU", payload["cuda_device_name"])
+
+    def test_mobile_sam_cuda_metadata_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = write_manifest(root)
+            out = root / "out"
+            with patch("image_segmentation.benchmark.run_benchmark._load_backend_app", return_value=FakeMobileSamApp()), patch(
+                "image_segmentation.benchmark.run_benchmark._runtime_device_info",
+                return_value={
+                    "requested_device": "cuda",
+                    "resolved_device": "cuda",
+                    "cuda_available": True,
+                    "cuda_device_name": "Fake GPU",
+                },
+            ):
+                run_benchmark(str(manifest), str(out), backend="mobile_sam")
+            payload = json.loads((out / "runtime_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual("mobile_sam", payload["backend_resolved"])
+            self.assertEqual("cuda", payload["resolved_device"])
+
     def test_prompt_perturbations_within_bounds(self):
         variants = generate_bbox_prompt_variants([0, 0, 5, 5], 20, 20, jitter_ratio=0.2)
         self.assertTrue(variants)

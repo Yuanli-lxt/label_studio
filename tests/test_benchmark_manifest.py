@@ -104,6 +104,12 @@ class BenchmarkManifestTests(unittest.TestCase):
     def test_coco1000_config_exists(self):
         self.assertTrue(Path("configs/benchmark_v0_1.coco1000.yaml").exists())
 
+    def test_coco100_config_exists(self):
+        self.assertTrue(Path("configs/benchmark_v0_1.coco100.yaml").exists())
+
+    def test_coco300_config_exists(self):
+        self.assertTrue(Path("configs/benchmark_v0_1.coco300.yaml").exists())
+
     def test_manifest_respects_max_samples_total(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -189,6 +195,58 @@ class BenchmarkManifestTests(unittest.TestCase):
             row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual("benchmark_v0_1_coco1000", row["benchmark_id"])
             self.assertEqual("benchmark_v0_1_coco1000", row["split"])
+
+    def test_coco100_manifest_benchmark_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            images, ann_file = self.tiny_coco_project(root, n_images=1, anns_per_image=1)
+            config = root / "config.yaml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "benchmark_id: benchmark_v0_1_coco100",
+                        "random_seed: 42",
+                        "max_samples_total: 1",
+                        "datasets:",
+                        "  coco:",
+                        "    enabled: true",
+                        f"    images_dir: {images}",
+                        f"    annotations_file: {ann_file}",
+                        "    max_samples: 1",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            output = root / "manifest.jsonl"
+            build_manifest(str(config), str(output))
+            row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual("benchmark_v0_1_coco100", row["benchmark_id"])
+
+    def test_coco300_manifest_benchmark_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            images, ann_file = self.tiny_coco_project(root, n_images=1, anns_per_image=1)
+            config = root / "config.yaml"
+            config.write_text(
+                "\n".join(
+                    [
+                        "benchmark_id: benchmark_v0_1_coco300",
+                        "random_seed: 42",
+                        "max_samples_total: 1",
+                        "datasets:",
+                        "  coco:",
+                        "    enabled: true",
+                        f"    images_dir: {images}",
+                        f"    annotations_file: {ann_file}",
+                        "    max_samples: 1",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            output = root / "manifest.jsonl"
+            build_manifest(str(config), str(output))
+            row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual("benchmark_v0_1_coco300", row["benchmark_id"])
 
     def test_manifest_summary_outputs_expected_fields(self):
         with tempfile.TemporaryDirectory() as tmp:

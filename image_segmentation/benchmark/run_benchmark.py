@@ -4,7 +4,10 @@ import argparse
 import importlib.util
 import json
 import os
+import statistics
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +49,8 @@ def run_benchmark(
     max_samples: int | None = None,
     resume: bool = False,
 ) -> dict:
+    started = time.monotonic()
+    started_at = _now_iso()
     backend_info = resolve_backend(backend)
     rows = _read_jsonl(manifest_path)
     if max_samples is not None:
@@ -53,19 +58,30 @@ def run_benchmark(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     resume_predictions, resume_warnings = _load_resume_predictions(output / "predictions.jsonl") if resume else ({}, [])
+    resumed_existing_predictions = sum(1 for row in rows if str(row.get("sample_id")) in resume_predictions)
     missing_rows = [row for row in rows if str(row.get("sample_id")) not in resume_predictions]
     app = (
         _load_backend_app(backend_info["backend_resolved"], enable_prompt_stability)
         if backend_info["uses_ml_app"] and missing_rows
         else None
     )
+    device_info = _runtime_device_info()
+    if (
+        backend_info["backend_resolved"] in SAM_BACKENDS
+        and str(device_info.get("requested_device") or "").lower() == "cuda"
+        and device_info.get("cuda_available") is False
+    ):
+        raise RuntimeError("IMAGE_SEG_DEVICE=cuda was requested, but torch.cuda.is_available() is false")
 
     prediction_rows: list[dict] = []
     correction_rows: list[dict] = []
     review_candidates: list[dict] = []
+    sample_seconds: list[float] = []
+    per_image_seconds: dict[str, list[float]] = {}
     predictions_path = output / "predictions.jsonl"
     corrections_path = output / "correction_delta_dataset.jsonl"
     for index, sample in enumerate(rows, start=1):
+        sample_started = time.monotonic()
         sample = _normalize_sample_paths(sample)
         _validate_prompt_box(sample.get("gt_bbox_xyxy"), int(sample["width"]), int(sample["height"]))
         existing_prediction_row = resume_predictions.get(str(sample.get("sample_id")))
@@ -80,7 +96,10 @@ def run_benchmark(
             correction_rows.append(correction_row)
             review_candidates.append(correction_row)
             _checkpoint_partial_outputs(predictions_path, corrections_path, prediction_rows, correction_rows)
-            _print_progress(index, len(rows), sample.get("sample_id"), resumed=True)
+            elapsed_sample = time.monotonic() - sample_started
+            sample_seconds.append(elapsed_sample)
+            per_image_seconds.setdefault(str(sample.get("image_id")), []).append(elapsed_sample)
+            _print_progress(index, len(rows), sample, started, sample_seconds, resumed=True)
             continue
         prediction = _predict_sample(app, sample, backend_info, enable_prompt_stability=enable_prompt_stability)
         pred_row, correction_row = _rows_from_prediction(prediction, sample, backend_info, risk_model_dir)
@@ -88,7 +107,10 @@ def run_benchmark(
         correction_rows.append(correction_row)
         review_candidates.append(correction_row)
         _checkpoint_partial_outputs(predictions_path, corrections_path, prediction_rows, correction_rows)
-        _print_progress(index, len(rows), sample.get("sample_id"), resumed=False)
+        elapsed_sample = time.monotonic() - sample_started
+        sample_seconds.append(elapsed_sample)
+        per_image_seconds.setdefault(str(sample.get("image_id")), []).append(elapsed_sample)
+        _print_progress(index, len(rows), sample, started, sample_seconds, resumed=False)
 
     prediction_rows = _dedupe_rows(prediction_rows, "sample_id")
     correction_rows = _dedupe_rows(correction_rows, "sample_id")
@@ -100,14 +122,28 @@ def run_benchmark(
     queue_result = build_segmentation_review_queue(review_candidates, str(queue_path))
     queue_items = queue_result["items"]
     report = build_evaluation_report(queue_items, correction_rows)
+    runtime = _runtime_metadata(
+        backend_info,
+        device_info,
+        rows,
+        prediction_rows,
+        started_at,
+        started,
+        sample_seconds,
+        per_image_seconds,
+        resume,
+        resumed_existing_predictions,
+    )
     report["backend"] = {
         "backend_requested": backend_info["backend_requested"],
         "backend_resolved": backend_info["backend_resolved"],
     }
+    report["runtime"] = runtime
     if resume_warnings:
         report.setdefault("metric_warnings", []).extend(resume_warnings)
         report.setdefault("overall_quality", {}).setdefault("metric_warnings", []).extend(resume_warnings)
     _write_json(output / "evaluation_report.json", report)
+    _write_json(output / "runtime_metadata.json", runtime)
     (output / "evaluation_report.md").write_text(render_markdown_report(report), encoding="utf-8")
     return {
         "output_dir": str(output),
@@ -116,6 +152,7 @@ def run_benchmark(
         "correction_delta_dataset_path": str(corrections_path),
         "review_queue_path": str(queue_path),
         "evaluation_report_path": str(output / "evaluation_report.json"),
+        "runtime_metadata_path": str(output / "runtime_metadata.json"),
         "warnings": resume_warnings,
     }
 
@@ -633,9 +670,126 @@ def _checkpoint_partial_outputs(
     _write_jsonl(corrections_path, _dedupe_rows(correction_rows, "sample_id"))
 
 
-def _print_progress(index: int, total: int, sample_id: Any, resumed: bool) -> None:
+def _print_progress(
+    index: int,
+    total: int,
+    sample: dict,
+    started: float,
+    sample_seconds: list[float],
+    resumed: bool,
+) -> None:
     action = "resumed" if resumed else "predicted"
-    print(f"[{action}] {index}/{total} sample_id={sample_id}", flush=True)
+    elapsed = time.monotonic() - started
+    avg = statistics.mean(sample_seconds) if sample_seconds else 0.0
+    remaining = max(0, total - index)
+    eta = remaining * avg if avg else None
+    eta_text = f"{eta:.1f}" if eta is not None else "n/a"
+    cuda = _cuda_memory_mb()
+    cuda_text = ""
+    if cuda:
+        cuda_text = f" cuda_allocated_mb={cuda.get('allocated_mb'):.1f} cuda_reserved_mb={cuda.get('reserved_mb'):.1f}"
+    print(
+        f"[{action}] {index}/{total} sample_id={sample.get('sample_id')} image={sample.get('image_path')} "
+        f"elapsed_s={elapsed:.1f} avg_s_per_sample={avg:.3f} eta_s={eta_text}{cuda_text}",
+        flush=True,
+    )
+
+
+def _runtime_metadata(
+    backend_info: dict,
+    device_info: dict,
+    requested_rows: list[dict],
+    completed_rows: list[dict],
+    started_at: str,
+    started: float,
+    sample_seconds: list[float],
+    per_image_seconds: dict[str, list[float]],
+    resume_enabled: bool,
+    resumed_existing_predictions: int,
+) -> dict:
+    elapsed = time.monotonic() - started
+    image_totals = [sum(values) for values in per_image_seconds.values()]
+    peak = _cuda_peak_memory_mb()
+    return {
+        "backend_requested": backend_info["backend_requested"],
+        "backend_resolved": backend_info["backend_resolved"],
+        "requested_device": device_info.get("requested_device"),
+        "resolved_device": device_info.get("resolved_device"),
+        "cuda_available": device_info.get("cuda_available"),
+        "cuda_device_name": device_info.get("cuda_device_name"),
+        "n_samples_requested": len(requested_rows),
+        "n_samples_completed": len(completed_rows),
+        "n_unique_images": len({str(row.get("image_id")) for row in completed_rows}),
+        "started_at": started_at,
+        "finished_at": _now_iso(),
+        "elapsed_seconds": elapsed,
+        "seconds_per_sample_mean": statistics.mean(sample_seconds) if sample_seconds else None,
+        "seconds_per_sample_median": statistics.median(sample_seconds) if sample_seconds else None,
+        "seconds_per_image_mean": statistics.mean(image_totals) if image_totals else None,
+        "resume_enabled": bool(resume_enabled),
+        "resumed_existing_predictions": int(resumed_existing_predictions),
+        "peak_cuda_memory_allocated_mb": peak.get("allocated_mb") if peak else None,
+        "peak_cuda_memory_reserved_mb": peak.get("reserved_mb") if peak else None,
+    }
+
+
+def _runtime_device_info() -> dict:
+    requested = os.getenv("IMAGE_SEG_DEVICE", "cpu").strip() or "cpu"
+    info = {
+        "requested_device": requested,
+        "resolved_device": requested,
+        "cuda_available": None,
+        "cuda_device_name": None,
+    }
+    try:
+        import torch
+
+        info["cuda_available"] = bool(torch.cuda.is_available())
+        if requested.lower() == "cuda":
+            if not info["cuda_available"]:
+                info["resolved_device"] = None
+                return info
+            index = torch.cuda.current_device()
+            info["resolved_device"] = "cuda"
+            info["cuda_device_name"] = torch.cuda.get_device_name(index)
+    except Exception:
+        if requested.lower() == "cuda":
+            info["resolved_device"] = None
+    return info
+
+
+def _cuda_memory_mb() -> dict | None:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        index = torch.cuda.current_device()
+        return {
+            "allocated_mb": float(torch.cuda.memory_allocated(index) / (1024 * 1024)),
+            "reserved_mb": float(torch.cuda.memory_reserved(index) / (1024 * 1024)),
+        }
+    except Exception:
+        return None
+
+
+def _cuda_peak_memory_mb() -> dict | None:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        index = torch.cuda.current_device()
+        return {
+            "allocated_mb": float(torch.cuda.max_memory_allocated(index) / (1024 * 1024)),
+            "reserved_mb": float(torch.cuda.max_memory_reserved(index) / (1024 * 1024)),
+        }
+    except Exception:
+        return None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _write_json(path: Path, payload: Any) -> None:

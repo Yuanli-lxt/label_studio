@@ -142,6 +142,35 @@ class SegmentationReviewQueueTests(unittest.TestCase):
             self.assertIn("output_path", summary)
             self.assertTrue(summary["reason_counts"])
 
+    def test_review_queue_accepts_weight_preset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            presets = root / "presets.json"
+            presets.write_text(json.dumps({"risk_heavy": {"correction_risk_score": 1.0}}), encoding="utf-8")
+            result = self.module.build_segmentation_review_queue(
+                [candidate(idx=1, risk=0.1), candidate(idx=2, risk=0.9)],
+                str(root / "queue.jsonl"),
+                weight_preset="risk_heavy",
+                weight_presets_file=str(presets),
+            )
+            self.assertEqual("risk_heavy", result["items"][0]["review_weight_preset"])
+
+    def test_review_queue_default_weights_unchanged(self):
+        item = self.module.score_review_candidate(candidate(risk=0.5))
+        self.assertEqual(self.module.DEFAULT_SCORE_WEIGHTS.keys(), item["review_weight_weights"].keys())
+        self.assertEqual("current", item["review_weight_preset"])
+
+    def test_review_queue_records_weight_preset(self):
+        item = self.module.score_review_candidate(candidate(risk=0.5), weight_preset="current")
+        self.assertIn("review_weight_preset", item)
+        self.assertIn("review_weight_weights", item)
+
+    def test_review_queue_custom_weights_no_delta_leakage(self):
+        weights = {"correction_risk_score": 1.0, "uncertainty_score": 0.0}
+        first = self.module.score_review_candidate(candidate(risk=0.5, delta_major=False), weights=weights)
+        second = self.module.score_review_candidate(candidate(risk=0.5, delta_major=True), weights=weights)
+        self.assertEqual(first["priority_score"], second["priority_score"])
+
     def test_empty_input_is_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "review_queue.jsonl"

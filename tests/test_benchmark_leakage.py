@@ -75,6 +75,11 @@ class BenchmarkLeakageTests(unittest.TestCase):
         for token in LEAKY_TOKENS:
             self.assertNotIn(token, source)
 
+    def test_runtime_metadata_not_used_in_risk_features(self):
+        joined = "\n".join(FEATURE_NAMES)
+        for token in ("runtime", "cuda", "device", "elapsed_seconds", "seconds_per_sample"):
+            self.assertNotIn(token, joined)
+
 
 if __name__ == "__main__":
     unittest.main()

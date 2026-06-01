@@ -270,6 +270,7 @@ def render_markdown_report(report: dict) -> str:
     overall = report.get("overall_quality", {})
     queue = report.get("review_queue_effectiveness", {})
     backend = report.get("backend") or {}
+    runtime = report.get("runtime") or {}
     warnings = report.get("metric_warnings") or []
     base = report.get("base_rate") or {}
     lines = [
@@ -278,6 +279,9 @@ def render_markdown_report(report: dict) -> str:
         "## Backend",
         f"- requested: {backend.get('backend_requested', 'unknown')}",
         f"- resolved: {backend.get('backend_resolved', 'unknown')}",
+        "",
+        "## Runtime",
+        *_runtime_lines(runtime),
         "",
         "## Overall Quality",
         f"- samples: {overall.get('n_samples')}",
@@ -388,6 +392,22 @@ def _uncertainty_lines(summary: dict) -> list[str]:
         f"- unstable_count: {summary.get('unstable_count')}",
         f"- unstable_major_correction_rate: {_fmt(summary.get('unstable_major_correction_rate'))}",
         f"- stable_major_correction_rate: {_fmt(summary.get('stable_major_correction_rate'))}",
+    ]
+
+
+def _runtime_lines(runtime: dict) -> list[str]:
+    if not runtime:
+        return ["- unavailable"]
+    return [
+        f"- requested device: {runtime.get('requested_device')}",
+        f"- resolved device: {runtime.get('resolved_device')}",
+        f"- cuda available: {runtime.get('cuda_available')}",
+        f"- cuda device: {runtime.get('cuda_device_name')}",
+        f"- samples completed: {runtime.get('n_samples_completed')} / {runtime.get('n_samples_requested')}",
+        f"- elapsed seconds: {_fmt(runtime.get('elapsed_seconds'))}",
+        f"- seconds/sample mean: {_fmt(runtime.get('seconds_per_sample_mean'))}",
+        f"- peak cuda allocated MB: {_fmt(runtime.get('peak_cuda_memory_allocated_mb'))}",
+        f"- peak cuda reserved MB: {_fmt(runtime.get('peak_cuda_memory_reserved_mb'))}",
     ]
 
 

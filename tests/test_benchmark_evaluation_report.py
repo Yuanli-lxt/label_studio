@@ -129,6 +129,27 @@ class BenchmarkEvaluationReportTests(unittest.TestCase):
         self.assertEqual(first["priority_score"], second["priority_score"])
         self.assertEqual(first["score_components"], second["score_components"])
 
+    def test_evaluation_report_runtime_section(self):
+        report = build_evaluation_report(
+            [queue_item(1, False, 0.9)],
+            [{"dataset": "COCO", "delta": queue_item(1, False, 0.9)["evaluation_only"]["delta"]}],
+        )
+        report["runtime"] = {
+            "requested_device": "cuda",
+            "resolved_device": "cuda",
+            "cuda_available": True,
+            "cuda_device_name": "Fake GPU",
+            "n_samples_completed": 1,
+            "n_samples_requested": 1,
+            "elapsed_seconds": 1.0,
+            "seconds_per_sample_mean": 1.0,
+            "peak_cuda_memory_allocated_mb": 10.0,
+            "peak_cuda_memory_reserved_mb": 20.0,
+        }
+        md = render_markdown_report(report)
+        self.assertIn("## Runtime", md)
+        self.assertIn("resolved device: cuda", md)
+
 
 if __name__ == "__main__":
     unittest.main()
