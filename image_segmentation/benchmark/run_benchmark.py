@@ -212,7 +212,8 @@ def _build_rows(
         model_bbox = meta.get("mask_bbox") or mask_bbox(model_mask)
         gt_bbox = mask_bbox(gt_mask) or sample["gt_bbox_xyxy"]
         _validate_bbox_in_bounds("prompt_box", meta.get("prompt_box"), width, height)
-        _validate_bbox_in_bounds("model_bbox", model_bbox, width, height)
+        if model_bbox is not None:
+            _validate_bbox_in_bounds("model_bbox", model_bbox, width, height)
         _validate_bbox_in_bounds("human_bbox", gt_bbox, width, height)
         delta = compute_mask_delta_metrics(
             model_mask,
@@ -231,6 +232,7 @@ def _build_rows(
             "image_path": sample.get("image_path"),
             "category_id": sample.get("category_id"),
             "category_name": sample.get("category_name"),
+            "category_frequency": sample.get("category_frequency"),
             "backend_requested": backend_info["backend_requested"],
             "backend_resolved": backend_info["backend_resolved"],
             "prediction_source": prediction.get("prediction_source"),
@@ -249,6 +251,7 @@ def _build_rows(
             "sample_id": sample.get("sample_id"),
             "task_id": sample.get("sample_id"),
             "category_name": sample.get("category_name"),
+            "category_frequency": sample.get("category_frequency"),
             "image": sample.get("image_path"),
             "image_id": sample.get("image_id"),
             "annotation_id": sample.get("annotation_id"),

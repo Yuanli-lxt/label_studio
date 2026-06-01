@@ -150,6 +150,22 @@ class BenchmarkEvaluationReportTests(unittest.TestCase):
         self.assertIn("## Runtime", md)
         self.assertIn("resolved device: cuda", md)
 
+    def test_lvis_evaluation_report_has_frequency_breakdown(self):
+        item = queue_item(1, True, 0.9)
+        report = build_evaluation_report(
+            [item],
+            [
+                {
+                    "dataset": "LVIS",
+                    "category_name": "thing",
+                    "category_frequency": "r",
+                    "delta": item["evaluation_only"]["delta"],
+                }
+            ],
+        )
+        self.assertEqual("r", report["category_frequency_breakdown"][0]["frequency"])
+        self.assertIn("Category Frequency Breakdown", render_markdown_report(report))
+
 
 if __name__ == "__main__":
     unittest.main()

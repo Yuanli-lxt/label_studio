@@ -41,6 +41,10 @@ def build_evaluation_report(queue_items: list[dict], correction_records: list[di
         warnings.append("precision@20% is below random expectation.")
     overall = {
         "n_samples": len(ok_records),
+        "n_unique_images": len({str(row.get("image_id")) for row in ok_records if row.get("image_id") is not None}),
+        "n_categories": len(
+            {str(row.get("category_name") or row.get("category_id")) for row in ok_records if row.get("category_name") or row.get("category_id")}
+        ),
         "mean_model_gt_iou": safe_mean(ious),
         "median_model_gt_iou": safe_median(ious),
         "mean_dice": safe_mean(dice),
@@ -71,6 +75,7 @@ def build_evaluation_report(queue_items: list[dict], correction_records: list[di
         "top_20_percent_samples": top_fraction_details(queue_items, 0.20),
         "false_negatives": false_negative_details(queue_items, 0.20, limit=20),
         "major_correction_diagnostics": major_correction_diagnostics(ok_records, queue_items),
+        "category_frequency_breakdown": category_frequency_breakdown(ok_records),
         "score_component_summary": score_component_summary(queue_items),
         "uncertainty_summary": uncertainty_summary(queue_items),
     }
@@ -219,6 +224,30 @@ def major_correction_diagnostics(records: list[dict], queue_items: list[dict]) -
     }
 
 
+def category_frequency_breakdown(records: list[dict]) -> list[dict]:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in records:
+        value = row.get("category_frequency")
+        if value is None and isinstance(row.get("metadata"), dict):
+            value = row["metadata"].get("category_frequency")
+        groups[str(value if value is not None else "unknown")].append(row)
+    out = []
+    for frequency, rows in sorted(groups.items()):
+        deltas = [row["delta"] for row in rows]
+        ious = [_num(delta.get("model_human_iou")) for delta in deltas if delta.get("model_human_iou") is not None]
+        out.append(
+            {
+                "frequency": frequency,
+                "n_samples": len(rows),
+                "mean_iou": safe_mean(ious),
+                "major_correction_rate": _safe_div(
+                    sum(1 for delta in deltas if delta.get("major_correction") is True), len(rows)
+                ),
+            }
+        )
+    return out
+
+
 def score_component_summary(items: list[dict]) -> dict:
     component_names = [
         "correction_risk_score",
@@ -285,6 +314,8 @@ def render_markdown_report(report: dict) -> str:
         "",
         "## Overall Quality",
         f"- samples: {overall.get('n_samples')}",
+        f"- unique images: {overall.get('n_unique_images')}",
+        f"- categories: {overall.get('n_categories')}",
         f"- mean model/GT IoU: {_fmt(overall.get('mean_model_gt_iou'))}",
         f"- median model/GT IoU: {_fmt(overall.get('median_model_gt_iou'))}",
         f"- mean Dice: {_fmt(overall.get('mean_dice'))}",
@@ -327,6 +358,9 @@ def render_markdown_report(report: dict) -> str:
         "",
         "## Major Correction Diagnostics",
         *_diagnostic_lines(report.get("major_correction_diagnostics") or {}),
+        "",
+        "## Category Frequency Breakdown",
+        *_frequency_lines(report.get("category_frequency_breakdown") or []),
         "",
         "## Warnings",
         *(f"- {warning}" for warning in warnings),
@@ -426,6 +460,16 @@ def _diagnostic_lines(diagnostics: dict) -> list[str]:
     lines.append("- top false negatives by low model_human_iou:")
     lines.extend(_sample_lines(diagnostics.get("top_false_negatives_by_low_model_human_iou") or []))
     return lines
+
+
+def _frequency_lines(rows: list[dict]) -> list[str]:
+    if not rows:
+        return ["- none"]
+    return [
+        f"- {row.get('frequency')}: n={row.get('n_samples')}, mean_iou={_fmt(row.get('mean_iou'))}, "
+        f"major_rate={_fmt(row.get('major_correction_rate'))}"
+        for row in rows
+    ]
 
 
 def _group_lines(rows: list[dict], name_key: str) -> list[str]:

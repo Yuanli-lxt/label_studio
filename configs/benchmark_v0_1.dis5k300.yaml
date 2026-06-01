@@ -1,0 +1,25 @@
+benchmark_id: benchmark_v0_1_dis5k300
+random_seed: 42
+max_samples_total: 300
+
+datasets:
+  dis5k:
+    enabled: true
+    images_dir: data/external/dis5k/images
+    masks_dir: data/external/dis5k/masks
+    max_samples: 300
+    image_glob: "*.*"
+    mask_glob: "*.png"
+    mask_match_strategy: same_stem
+    category_name: foreground_object
+    category_id: foreground_object
+
+sampling:
+  strategy: stratified
+  image_diversity: true
+  include_tags:
+    - small_object
+    - medium_object
+    - large_object
+    - touches_border
+    - elongated_object

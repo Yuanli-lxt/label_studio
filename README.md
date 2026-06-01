@@ -104,10 +104,166 @@ Report metrics:
 - average precision summarizes ranking quality over all major-correction samples.
 
 Current limitations and TODO:
-- COCO val2017 is the only fully implemented dataset loader.
-- LVIS, DIS5K, COD10K, CAMO, and Open Images are scaffolded for later loaders.
+- COCO val2017 and LVIS val use COCO-style instance annotations; DIS5K, COD10K, CAMO, and Open Images subset support use local manifest/preflight loaders.
 - COCO has no explicit low-contrast, occlusion, or truncation metadata in this MVP.
 - Placeholder backend remains a deterministic fallback; MobileSAM requires the existing backend dependencies/checkpoints.
+
+### Additional Dataset Setup
+
+List supported datasets:
+
+```bash
+python -m image_segmentation.benchmark.list_datasets
+```
+
+General principles: `download_data` is always an explicit command. `build_manifest` and `run_benchmark` never download data implicitly. Manual datasets require you to confirm license terms and download sources yourself. `data/external/` is ignored by git and must not be committed. Ground truth and correction deltas are only for benchmark/evaluation; they must not enter priority scoring. Natural validation datasets should not be selected based on model failures.
+
+LVIS val is used for long-tail categories, small objects, and crowded multi-instance scenes. It downloads annotations to `data/external/lvis/annotations/lvis_v1_val.json` and reuses COCO images from `data/external/coco/val2017`.
+
+```bash
+python -m image_segmentation.benchmark.download_data --dataset lvis_val --output-dir data/external --dry-run
+python -m image_segmentation.benchmark.download_data --dataset lvis_val --output-dir data/external
+python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.lvis500.yaml
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.lvis500.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_manifest.jsonl
+```
+
+DIS5K is for high-fidelity boundaries and complex foreground object contours. The first implementation is manual placement:
+
+```text
+data/external/dis5k/
+  images/
+  masks/
+```
+
+```bash
+python -m image_segmentation.benchmark.download_data --dataset dis5k --output-dir data/external
+python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.dis5k300.yaml
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.dis5k300.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest.jsonl
+```
+
+COD10K and CAMO are for camouflaged, low-contrast objects and prompt-stability uncertainty stress tests. They reuse the mask-folder loader and add `low_contrast` plus `camouflaged_object` tags by default. Manual placement is expected:
+
+```text
+data/external/cod10k/images/
+data/external/cod10k/masks/
+data/external/camo/images/
+data/external/camo/masks/
+```
+
+```bash
+python -m image_segmentation.benchmark.download_data --dataset cod10k --output-dir data/external
+python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.cod10k300.yaml
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.cod10k300.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_cod10k300_manifest.jsonl
+
+python -m image_segmentation.benchmark.download_data --dataset camo --output-dir data/external
+python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.camo300.yaml
+```
+
+Open Images V7 segmentations are for occlusion, truncation, group-object, and instance-segmentation variety. Use only a validation subset at first; do not download the full dataset. The optional FiftyOne path requires `pip install fiftyone` and exports to:
+
+```text
+data/external/open_images_v7/validation/
+  images/
+  segmentations/
+  metadata.json
+  annotations.jsonl
+```
+
+```bash
+python -m image_segmentation.benchmark.download_data \
+  --dataset open_images_v7_segmentations \
+  --output-dir data/external \
+  --split validation \
+  --max-samples 1000 \
+  --use-fiftyone true
+
+python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.open_images500.yaml
+```
+
+License and source notes: COCO follows COCO image/annotation terms. LVIS annotations are CC BY 4.0 while images follow their source terms. DIS5K, COD10K, CAMO, and Open Images require checking their current dataset licenses and image-level terms before use.
+
+### LVIS500 Validation
+
+LVIS500 validates whether the COCO1000 finding transfers to a longer-tail, more crowded, smaller-object instance segmentation dataset. COCO1000 showed the MobileSAM benchmark, correction deltas, OOF correction-risk signal, and Layer 5 prioritization are viable; LVIS is the next stress test before any default weight change. Do not run Layer 6 and do not change default Layer 5 weights before LVIS results are reviewed.
+
+Prepare LVIS val annotations. LVIS uses the existing COCO val2017 image directory at `data/external/coco/val2017`; this command downloads annotations only.
+
+```bash
+python -m image_segmentation.benchmark.download_data \
+  --dataset lvis_val \
+  --output-dir data/external
+```
+
+Preflight and build the LVIS500 manifest:
+
+```bash
+python -m image_segmentation.benchmark.preflight \
+  --config configs/benchmark_v0_1.lvis500.yaml \
+  --json-output demo_data/model_state/image_segmentation/benchmark/lvis500_preflight.json
+
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.lvis500.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_manifest.jsonl \
+  --summary-output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_manifest_summary.json
+```
+
+Run the MobileSAM GPU benchmark without prompt-stability uncertainty:
+
+```bash
+export IMAGE_SEG_BACKEND=mobilesam
+export IMAGE_SEG_CHECKPOINT=/home/yuanli/projects/label-platform/models/mobilesam/mobile_sam.pt
+export IMAGE_SEG_DEVICE=cuda
+export CUDA_VISIBLE_DEVICES=0
+
+python -m image_segmentation.benchmark.preflight_backend \
+  --backend mobile_sam \
+  --checkpoint /home/yuanli/projects/label-platform/models/mobilesam/mobile_sam.pt \
+  --device cuda
+
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu \
+  --backend mobile_sam \
+  --enable-prompt-stability false \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk \
+  --resume true
+```
+
+Run OOF risk evaluation, weight ablation, and COCO-vs-LVIS comparison:
+
+```bash
+python -m image_segmentation.benchmark.crossfit_risk_evaluation \
+  --delta-dataset demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu/correction_delta_dataset.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof \
+  --n-splits 5 \
+  --random-seed 42 \
+  --bootstrap-iters 1000
+
+python -m image_segmentation.benchmark.ablate_review_weights \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof/oof_review_queue.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof_weight_ablation \
+  --bootstrap-iters 1000 \
+  --random-seed 42
+
+python -m image_segmentation.benchmark.compare_benchmark_runs \
+  --left-name COCO1000 \
+  --left-report demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu/evaluation_report.json \
+  --left-oof demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof/oof_summary.json \
+  --left-ablation demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof_weight_ablation/weight_ablation.json \
+  --right-name LVIS500 \
+  --right-report demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu/evaluation_report.json \
+  --right-oof demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof/oof_summary.json \
+  --right-ablation demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof_weight_ablation/weight_ablation.json \
+  --output demo_data/model_state/image_segmentation/benchmark/coco1000_vs_lvis500_comparison.md
+```
+
+Interpretation: rare-category correction rate tells you whether long-tail LVIS categories are harder, but do not use GT-only frequency metadata in production scoring unless comparable category metadata is available at prediction time. If `risk_heavy` beats current on both COCO1000 and LVIS500, keep the default unchanged and mark `risk_heavy` as a strong experimental candidate. If LVIS disagrees with COCO, validate DIS5K or COD10K next before tuning defaults.
 
 Boundaries:
 - This is not a production-grade active learning platform yet.

@@ -6,8 +6,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from image_segmentation.benchmark.config import enabled_coco_config, load_config
+from image_segmentation.benchmark.config import enabled_coco_config, enabled_dataset_configs, load_config
 from image_segmentation.benchmark.datasets.coco import iter_coco_manifest_samples
+from image_segmentation.benchmark.datasets.lvis import iter_lvis_manifest_samples, lvis_annotation_stats
+from image_segmentation.benchmark.datasets.mask_folder import iter_mask_folder_manifest_samples
+from image_segmentation.benchmark.datasets.open_images import iter_open_images_manifest_samples
 from image_segmentation.benchmark.sampling import sample_manifest_rows
 from image_segmentation.benchmark.schema import validate_manifest_sample
 
@@ -21,6 +24,7 @@ def build_manifest(config_path: str, output_path: str, summary_output: str | Non
 
     rows: list[dict] = []
     coco = enabled_coco_config(config)
+    enabled_datasets = enabled_dataset_configs(config)
     sampling = config.get("sampling") if isinstance(config.get("sampling"), dict) else {}
     if coco:
         coco_max_samples = int(coco["max_samples"]) if coco.get("max_samples") is not None else None
@@ -33,6 +37,44 @@ def build_manifest(config_path: str, output_path: str, summary_output: str | Non
                 max_samples=raw_coco_limit,
             )
         )
+    for dataset_name, dataset_config in enabled_datasets.items():
+        if dataset_name == "coco":
+            continue
+        dataset_max_samples = int(dataset_config["max_samples"]) if dataset_config.get("max_samples") is not None else None
+        raw_limit = None if sampling.get("image_diversity") is True else dataset_max_samples
+        if dataset_name == "lvis":
+            rows.extend(
+                iter_lvis_manifest_samples(
+                    dataset_config["images_dir"],
+                    dataset_config["annotations_file"],
+                    benchmark_id=benchmark_id,
+                    max_samples=raw_limit,
+                )
+            )
+        elif dataset_name in {"dis5k", "cod10k", "camo"}:
+            rows.extend(
+                iter_mask_folder_manifest_samples(
+                    dataset_config["images_dir"],
+                    dataset_config["masks_dir"],
+                    benchmark_id=benchmark_id,
+                    dataset_name=dataset_name,
+                    max_samples=raw_limit,
+                    image_glob=str(dataset_config.get("image_glob") or "*.*"),
+                    mask_glob=str(dataset_config.get("mask_glob") or "*.png"),
+                    mask_match_strategy=str(dataset_config.get("mask_match_strategy") or "same_stem"),
+                    category_name=str(dataset_config.get("category_name") or "foreground_object"),
+                    category_id=str(dataset_config.get("category_id") or dataset_config.get("category_name") or "foreground_object"),
+                    default_difficulty_tags=list(dataset_config.get("default_difficulty_tags") or []),
+                )
+            )
+        elif dataset_name == "open_images_v7":
+            rows.extend(
+                iter_open_images_manifest_samples(
+                    dataset_config["dataset_dir"],
+                    benchmark_id=benchmark_id,
+                    max_samples=raw_limit,
+                )
+            )
     if not rows:
         raise RuntimeError("no enabled benchmark datasets produced samples")
     if max_total is None and coco and coco.get("max_samples") is not None:
@@ -65,6 +107,17 @@ def build_manifest(config_path: str, output_path: str, summary_output: str | Non
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     summary = manifest_summary(rows, seed=seed, warnings=warnings)
+    if "lvis" in enabled_datasets:
+        try:
+            lvis = enabled_datasets["lvis"]
+            stats = lvis_annotation_stats(lvis["images_dir"], lvis["annotations_file"])
+            summary["frequency_distribution"] = frequency_distribution(rows)
+            summary["missing_image_count"] = stats["n_missing_images"]
+            summary["missing_image_examples"] = stats["missing_image_examples"]
+            summary["skipped_annotation_count"] = stats["skipped_annotation_count"]
+            summary["skipped_annotation_reasons"] = stats["skipped_annotation_reasons"]
+        except Exception as exc:
+            summary.setdefault("warnings", []).append(f"lvis_summary_stats_unavailable: {exc}")
     if summary_output:
         summary_path = Path(summary_output)
         summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,12 +144,24 @@ def manifest_summary(rows: list[dict], seed: int = 42, warnings: list[str] | Non
         "n_categories": len(category_counts),
         "category_distribution": dict(sorted(category_counts.items())),
         "category_distribution_top20": dict(category_counts.most_common(20)),
+        "frequency_distribution": frequency_distribution(rows),
         "difficulty_tag_distribution": dict(sorted(tag_counts.items())),
         "max_instances_per_image_observed": max(image_counts.values()) if image_counts else 0,
         "area_ratio_distribution": _distribution(area_ratios),
         "random_seed": int(seed),
         "warnings": warnings or [],
     }
+
+
+def frequency_distribution(rows: list[dict]) -> dict:
+    values = Counter()
+    for row in rows:
+        value = row.get("category_frequency")
+        if value is None and isinstance(row.get("metadata"), dict):
+            value = row["metadata"].get("category_frequency")
+        if value is not None:
+            values[str(value)] += 1
+    return dict(sorted(values.items()))
 
 
 def _distribution(values: list[float]) -> dict:

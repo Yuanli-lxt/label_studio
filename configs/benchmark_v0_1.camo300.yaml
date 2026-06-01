@@ -1,0 +1,28 @@
+benchmark_id: benchmark_v0_1_camo300
+random_seed: 42
+max_samples_total: 300
+
+datasets:
+  camo:
+    enabled: true
+    images_dir: data/external/camo/images
+    masks_dir: data/external/camo/masks
+    max_samples: 300
+    image_glob: "*.*"
+    mask_glob: "*.png"
+    mask_match_strategy: same_stem
+    category_name: camouflaged_object
+    category_id: camouflaged_object
+    default_difficulty_tags:
+      - low_contrast
+      - camouflaged_object
+
+sampling:
+  strategy: stratified
+  image_diversity: true
+  include_tags:
+    - small_object
+    - touches_border
+    - elongated_object
+    - low_contrast
+    - camouflaged_object

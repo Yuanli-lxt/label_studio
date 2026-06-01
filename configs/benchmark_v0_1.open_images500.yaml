@@ -1,0 +1,22 @@
+benchmark_id: benchmark_v0_1_open_images500
+random_seed: 42
+max_samples_total: 500
+
+datasets:
+  open_images_v7:
+    enabled: true
+    dataset_dir: data/external/open_images_v7/validation
+    max_samples: 500
+
+sampling:
+  strategy: stratified
+  category_balance: true
+  image_diversity: true
+  max_instances_per_image: 3
+  include_tags:
+    - small_object
+    - touches_border
+    - elongated_object
+    - is_occluded
+    - is_truncated
+    - is_group_of

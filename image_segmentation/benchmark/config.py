@@ -26,3 +26,11 @@ def enabled_coco_config(config: dict) -> dict | None:
     coco = datasets.get("coco") if isinstance(datasets.get("coco"), dict) else {}
     return coco if coco.get("enabled") is True else None
 
+
+def enabled_dataset_configs(config: dict) -> dict[str, dict]:
+    datasets = config.get("datasets") if isinstance(config.get("datasets"), dict) else {}
+    return {
+        str(name): dataset
+        for name, dataset in datasets.items()
+        if isinstance(dataset, dict) and dataset.get("enabled") is True
+    }

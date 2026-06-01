@@ -1,0 +1,28 @@
+benchmark_id: benchmark_v0_1_lvis500
+random_seed: 42
+max_samples_total: 500
+
+datasets:
+  lvis:
+    enabled: true
+    images_dir: data/external/coco/val2017
+    annotations_file: data/external/lvis/annotations/lvis_v1_val.json
+    max_samples: 500
+
+sampling:
+  strategy: stratified
+  category_balance: true
+  image_diversity: true
+  max_instances_per_image: 3
+  include_frequency_groups:
+    - r
+    - c
+    - f
+  include_tags:
+    - small_object
+    - touches_border
+    - elongated_object
+    - crowded_or_multi_instance
+    - rare_category
+    - common_category
+    - frequent_category
