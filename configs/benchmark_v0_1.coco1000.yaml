@@ -1,13 +1,13 @@
-benchmark_id: benchmark_v0_1
+benchmark_id: benchmark_v0_1_coco1000
 random_seed: 42
-max_samples_total: 150
+max_samples_total: 1000
 
 datasets:
   coco:
     enabled: true
     images_dir: data/external/coco/val2017
     annotations_file: data/external/coco/annotations/instances_val2017.json
-    max_samples: 150
+    max_samples: 1000
 
   lvis:
     enabled: false
@@ -24,6 +24,8 @@ datasets:
 sampling:
   strategy: stratified
   category_balance: true
+  image_diversity: true
+  max_instances_per_image: 3
   include_tags:
     - small_object
     - touches_border

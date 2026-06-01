@@ -6,12 +6,14 @@ from pathlib import Path
 from image_segmentation.benchmark.run_benchmark import TRAINER_DIR
 
 import sys
+import inspect
 
 if str(TRAINER_DIR) not in sys.path:
     sys.path.insert(0, str(TRAINER_DIR))
 
 from segmentation_correction_risk import FEATURE_NAMES  # noqa: E402
 from segmentation_review_queue import score_review_candidate  # noqa: E402
+from image_segmentation.benchmark import sampling  # noqa: E402
 
 
 LEAKY_TOKENS = {
@@ -68,7 +70,11 @@ class BenchmarkLeakageTests(unittest.TestCase):
         self.assertFalse(first["evaluation_only"]["delta"]["major_correction"])
         self.assertTrue(second["evaluation_only"]["delta"]["major_correction"])
 
+    def test_manifest_does_not_use_delta_fields_for_sampling(self):
+        source = inspect.getsource(sampling.sample_manifest_rows)
+        for token in LEAKY_TOKENS:
+            self.assertNotIn(token, source)
+
 
 if __name__ == "__main__":
     unittest.main()
-

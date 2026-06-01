@@ -151,6 +151,8 @@ def _queue_item(record: dict, correction_risk: dict, components: dict, weights: 
     return {
         "rank": None,
         "task_id": record.get("task_id"),
+        "dataset": record.get("dataset"),
+        "category_name": record.get("category_name"),
         "image": record.get("image"),
         "prediction_id": record.get("prediction_id"),
         "model_version": record.get("model_version"),
@@ -283,6 +285,7 @@ def _review_reasons(record: dict, correction_risk: dict, components: dict) -> li
     elif risk_score >= 0.40:
         reasons.append("medium_correction_risk")
     elif not correction_risk:
+        reasons.append("missing_correction_risk_score")
         reasons.append("missing_correction_risk_model")
 
     uncertainty = record.get("uncertainty") if isinstance(record.get("uncertainty"), dict) else {}

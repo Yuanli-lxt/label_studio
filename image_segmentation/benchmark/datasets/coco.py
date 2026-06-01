@@ -44,6 +44,12 @@ def iter_coco_manifest_samples(
         if width <= 0 or height <= 0:
             continue
         image_path = Path(images_dir) / str(image.get("file_name") or "")
+        actual_width, actual_height = _image_file_size(image_path)
+        if actual_width != width or actual_height != height:
+            raise ValueError(
+                f"COCO image size mismatch for {image_path}: "
+                f"metadata={width}x{height}, file={actual_width}x{actual_height}"
+            )
         bbox_xyxy = coco_xywh_to_xyxy(ann["bbox"], width, height)
         mask = segmentation_to_mask(ann.get("segmentation"), width, height, ann.get("iscrowd", 0))
         area = int(mask.sum()) if mask is not None else int(float(ann.get("area") or 0))
@@ -147,6 +153,18 @@ def _valid_annotation(row: Any) -> bool:
     )
 
 
+def _image_file_size(path: Path) -> tuple[int, int]:
+    if not path.exists():
+        raise FileNotFoundError(f"COCO image file not found: {path}")
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return int(image.width), int(image.height)
+    except Exception as exc:
+        raise ValueError(f"could not read COCO image size for {path}: {exc}") from exc
+
+
 def _polygon_mask(polygons: list, width: int, height: int) -> np.ndarray:
     from PIL import Image, ImageDraw
 
@@ -171,4 +189,3 @@ def _uncompressed_rle_mask(counts: list[int], width: int, height: int) -> np.nda
         values.extend([0] * (total - len(values)))
     arr = np.asarray(values[:total], dtype=np.uint8)
     return arr.reshape((height, width), order="F")
-

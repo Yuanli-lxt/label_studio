@@ -579,6 +579,63 @@ scripts/run_image_classifier_regression_probes.sh
 scripts/run_image_classifier_validation_gate.sh
 ```
 
+## COCO1000 Natural Validation
+
+COCO150 was useful for plumbing, but it had only about 8 `major_correction` positives and the OOF metrics had very high variance. COCO1000 expands validation to 1000 COCO instance annotation samples so the correction-risk model and Layer 5 review queue can be checked with more positive examples before changing weights.
+
+COCO1000 means 1000 instance annotations, not necessarily 1000 unique images. It is a natural benchmark: samples are selected from COCO metadata for category balance and image diversity, not from model failure, delta, GT quality, `model_human_iou`, `major_correction`, or `correction_area_ratio`.
+
+Build the manifest:
+
+```bash
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.coco1000.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_manifest.jsonl \
+  --summary-output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_manifest_summary.json
+```
+
+Run MobileSAM. CPU can take a while, so use resume:
+
+```bash
+export IMAGE_SEG_BACKEND=mobilesam
+export IMAGE_SEG_CHECKPOINT=/home/yuanli/projects/label-platform/models/mobilesam/mobile_sam.pt
+export IMAGE_SEG_DEVICE=cpu
+
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam \
+  --backend mobile_sam \
+  --enable-prompt-stability false \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk \
+  --resume true
+```
+
+Run OOF risk evaluation:
+
+```bash
+python -m image_segmentation.benchmark.crossfit_risk_evaluation \
+  --delta-dataset demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam/correction_delta_dataset.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_oof \
+  --n-splits 5 \
+  --random-seed 42 \
+  --bootstrap-iters 1000
+```
+
+Optional held-out split:
+
+```bash
+python -m image_segmentation.benchmark.make_eval_splits \
+  --delta-dataset demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam/correction_delta_dataset.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_splits \
+  --strategy stratified \
+  --train-ratio 0.7 \
+  --random-seed 42
+```
+
+Read the result conservatively. Prefer at least 30 positives, and 50 is better. Initial evidence requires OOF lift@20 > 1.5, OOF AP above the base rate, precision@20 above random expected precision, and bootstrap intervals that are not too wide. If the lift CI covers 1.0, the result is still unstable.
+
+Do not tune Layer 5 weights before COCO1000 OOF evidence. Do not use evaluation diagnostics for ranking, risk-model features, or manifest sampling. Do not auto-download data for this validation path.
+
 ## Tests
 
 ```bash

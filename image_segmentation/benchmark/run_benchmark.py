@@ -13,20 +13,28 @@ import numpy as np
 from image_segmentation.benchmark.datasets.coco import segmentation_to_mask
 from image_segmentation.benchmark.evaluation import build_evaluation_report, render_markdown_report
 from image_segmentation.benchmark.metrics import mask_bbox
+from image_segmentation.benchmark.schema import clip_xyxy
 
 
 ROOT = Path(__file__).resolve().parents[2]
 ML_APP_PATH = ROOT / "services" / "ml-backend" / "app.py"
+ML_BACKEND_DIR = ROOT / "services" / "ml-backend"
 TRAINER_DIR = ROOT / "services" / "trainer"
+if str(ML_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(ML_BACKEND_DIR))
 if str(TRAINER_DIR) not in sys.path:
     sys.path.insert(0, str(TRAINER_DIR))
 
+from segmentation_quality import evaluate_segmentation_quality  # noqa: E402
+from segmentation_uncertainty import evaluate_prompt_stability, generate_bbox_prompt_variants  # noqa: E402
 from segmentation_correction_risk import predict_correction_risk  # noqa: E402
 from segmentation_corrections import compute_mask_delta_metrics  # noqa: E402
 from segmentation_review_queue import build_segmentation_review_queue  # noqa: E402
 
 
 LABEL_CONFIG = """<View><Image name="image" value="$image"/><BrushLabels name="mask_label" toName="image"><Label value="Object"/></BrushLabels></View>"""
+BACKEND_CHOICES = ("bbox_rect", "mobile_sam", "placeholder", "sam", "sam2")
+SAM_BACKENDS = {"mobile_sam", "sam", "sam2"}
 
 
 def run_benchmark(
@@ -35,25 +43,140 @@ def run_benchmark(
     backend: str = "placeholder",
     enable_prompt_stability: bool = False,
     risk_model_dir: str | None = None,
+    max_samples: int | None = None,
+    resume: bool = False,
 ) -> dict:
+    backend_info = resolve_backend(backend)
     rows = _read_jsonl(manifest_path)
+    if max_samples is not None:
+        rows = rows[: max(0, int(max_samples))]
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    app = _load_backend_app(backend, enable_prompt_stability)
+    resume_predictions, resume_warnings = _load_resume_predictions(output / "predictions.jsonl") if resume else ({}, [])
+    missing_rows = [row for row in rows if str(row.get("sample_id")) not in resume_predictions]
+    app = (
+        _load_backend_app(backend_info["backend_resolved"], enable_prompt_stability)
+        if backend_info["uses_ml_app"] and missing_rows
+        else None
+    )
 
     prediction_rows: list[dict] = []
     correction_rows: list[dict] = []
     review_candidates: list[dict] = []
-    for sample in rows:
-        prediction = _predict_sample(app, sample)
-        result = prediction["result"][0]
+    predictions_path = output / "predictions.jsonl"
+    corrections_path = output / "correction_delta_dataset.jsonl"
+    for index, sample in enumerate(rows, start=1):
+        sample = _normalize_sample_paths(sample)
+        _validate_prompt_box(sample.get("gt_bbox_xyxy"), int(sample["width"]), int(sample["height"]))
+        existing_prediction_row = resume_predictions.get(str(sample.get("sample_id")))
+        if existing_prediction_row:
+            pred_row, correction_row = _rows_from_existing_prediction(
+                existing_prediction_row,
+                sample,
+                backend_info,
+                risk_model_dir,
+            )
+            prediction_rows.append(pred_row)
+            correction_rows.append(correction_row)
+            review_candidates.append(correction_row)
+            _checkpoint_partial_outputs(predictions_path, corrections_path, prediction_rows, correction_rows)
+            _print_progress(index, len(rows), sample.get("sample_id"), resumed=True)
+            continue
+        prediction = _predict_sample(app, sample, backend_info, enable_prompt_stability=enable_prompt_stability)
+        pred_row, correction_row = _rows_from_prediction(prediction, sample, backend_info, risk_model_dir)
+        prediction_rows.append(pred_row)
+        correction_rows.append(correction_row)
+        review_candidates.append(correction_row)
+        _checkpoint_partial_outputs(predictions_path, corrections_path, prediction_rows, correction_rows)
+        _print_progress(index, len(rows), sample.get("sample_id"), resumed=False)
+
+    prediction_rows = _dedupe_rows(prediction_rows, "sample_id")
+    correction_rows = _dedupe_rows(correction_rows, "sample_id")
+    review_candidates = _dedupe_rows(review_candidates, "sample_id")
+
+    queue_path = output / "review_queue.jsonl"
+    _write_jsonl(predictions_path, prediction_rows)
+    _write_jsonl(corrections_path, correction_rows)
+    queue_result = build_segmentation_review_queue(review_candidates, str(queue_path))
+    queue_items = queue_result["items"]
+    report = build_evaluation_report(queue_items, correction_rows)
+    report["backend"] = {
+        "backend_requested": backend_info["backend_requested"],
+        "backend_resolved": backend_info["backend_resolved"],
+    }
+    if resume_warnings:
+        report.setdefault("metric_warnings", []).extend(resume_warnings)
+        report.setdefault("overall_quality", {}).setdefault("metric_warnings", []).extend(resume_warnings)
+    _write_json(output / "evaluation_report.json", report)
+    (output / "evaluation_report.md").write_text(render_markdown_report(report), encoding="utf-8")
+    return {
+        "output_dir": str(output),
+        "n_samples": len(rows),
+        "predictions_path": str(predictions_path),
+        "correction_delta_dataset_path": str(corrections_path),
+        "review_queue_path": str(queue_path),
+        "evaluation_report_path": str(output / "evaluation_report.json"),
+        "warnings": resume_warnings,
+    }
+
+
+def _rows_from_prediction(
+    prediction: dict,
+    sample: dict,
+    backend_info: dict,
+    risk_model_dir: str | None = None,
+) -> tuple[dict, dict]:
+    _validate_backend_prediction(prediction, backend_info, sample)
+    result = prediction["result"][0]
+    return _build_rows(prediction, result, sample, backend_info, risk_model_dir)
+
+
+def _rows_from_existing_prediction(
+    prediction_row: dict,
+    sample: dict,
+    backend_info: dict,
+    risk_model_dir: str | None = None,
+) -> tuple[dict, dict]:
+    prediction = prediction_row.get("prediction") if isinstance(prediction_row.get("prediction"), dict) else {}
+    result = prediction_row.get("result") if isinstance(prediction_row.get("result"), dict) else None
+    if result is None:
+        result = (prediction.get("result") or [{}])[0]
+    prediction = dict(prediction)
+    prediction.setdefault("result", [result])
+    prediction.setdefault("prediction_source", prediction_row.get("prediction_source"))
+    prediction.setdefault("model_version", prediction_row.get("model_version"))
+    _validate_backend_prediction(prediction, backend_info, sample)
+    return _build_rows(prediction, result, sample, backend_info, risk_model_dir)
+
+
+def _build_rows(
+    prediction: dict,
+    result: dict,
+    sample: dict,
+    backend_info: dict,
+    risk_model_dir: str | None = None,
+) -> tuple[dict, dict]:
         meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
         width = int(sample["width"])
         height = int(sample["height"])
-        model_mask = _decode_prediction_mask(result, width, height)
+        model_mask = _decode_prediction_mask(result)
+        if model_mask.shape != (height, width):
+            model_mask = _resize_mask_to_shape(model_mask, width, height)
+            model_bbox = mask_bbox(model_mask)
+            _rewrite_result_mask(result, model_mask, width, height, model_bbox)
+        _refresh_quality_metadata(result, model_mask, sample, backend_info)
+        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
         gt_mask = segmentation_to_mask(sample.get("gt_segmentation"), width, height, int(sample.get("gt_iscrowd") or 0))
+        if model_mask.shape != gt_mask.shape:
+            raise ValueError(
+                f"prediction and GT mask shape mismatch for {sample.get('sample_id')}: "
+                f"prediction={model_mask.shape}, gt={gt_mask.shape}"
+            )
         model_bbox = meta.get("mask_bbox") or mask_bbox(model_mask)
         gt_bbox = mask_bbox(gt_mask) or sample["gt_bbox_xyxy"]
+        _validate_bbox_in_bounds("prompt_box", meta.get("prompt_box"), width, height)
+        _validate_bbox_in_bounds("model_bbox", model_bbox, width, height)
+        _validate_bbox_in_bounds("human_bbox", gt_bbox, width, height)
         delta = compute_mask_delta_metrics(
             model_mask,
             gt_mask,
@@ -71,6 +194,11 @@ def run_benchmark(
             "image_path": sample.get("image_path"),
             "category_id": sample.get("category_id"),
             "category_name": sample.get("category_name"),
+            "backend_requested": backend_info["backend_requested"],
+            "backend_resolved": backend_info["backend_resolved"],
+            "prediction_source": prediction.get("prediction_source"),
+            "model_version": prediction.get("model_version"),
+            "model_config": meta.get("model_config"),
             "prediction": prediction,
             "result": result,
             "mask_quality": meta.get("mask_quality"),
@@ -83,6 +211,7 @@ def run_benchmark(
             "dataset": sample.get("dataset"),
             "sample_id": sample.get("sample_id"),
             "task_id": sample.get("sample_id"),
+            "category_name": sample.get("category_name"),
             "image": sample.get("image_path"),
             "image_id": sample.get("image_id"),
             "annotation_id": sample.get("annotation_id"),
@@ -107,31 +236,33 @@ def run_benchmark(
                 correction_row.update(predict_correction_risk(correction_row, risk_model_dir))
             except Exception as exc:
                 correction_row["correction_risk_error"] = str(exc)
-        prediction_rows.append(pred_row)
-        correction_rows.append(correction_row)
-        review_candidates.append(correction_row)
+        return pred_row, correction_row
 
-    predictions_path = output / "predictions.jsonl"
-    corrections_path = output / "correction_delta_dataset.jsonl"
-    queue_path = output / "review_queue.jsonl"
-    _write_jsonl(predictions_path, prediction_rows)
-    _write_jsonl(corrections_path, correction_rows)
-    queue_result = build_segmentation_review_queue(review_candidates, str(queue_path))
-    queue_items = queue_result["items"]
-    report = build_evaluation_report(queue_items, correction_rows)
-    _write_json(output / "evaluation_report.json", report)
-    (output / "evaluation_report.md").write_text(render_markdown_report(report), encoding="utf-8")
+
+def resolve_backend(backend: str) -> dict:
+    requested = (backend or "").strip().lower()
+    if requested not in BACKEND_CHOICES:
+        raise ValueError(
+            f"unknown benchmark backend '{backend}'. Choose one of: {', '.join(BACKEND_CHOICES)}. "
+            "Use --backend placeholder explicitly only for plumbing smoke tests."
+        )
     return {
-        "output_dir": str(output),
-        "n_samples": len(rows),
-        "predictions_path": str(predictions_path),
-        "correction_delta_dataset_path": str(corrections_path),
-        "review_queue_path": str(queue_path),
-        "evaluation_report_path": str(output / "evaluation_report.json"),
+        "backend_requested": requested,
+        "backend_resolved": requested,
+        "uses_ml_app": requested in SAM_BACKENDS or requested == "placeholder",
     }
 
 
-def _predict_sample(app: Any, sample: dict) -> dict:
+def _predict_sample(
+    app: Any,
+    sample: dict,
+    backend_info: dict,
+    enable_prompt_stability: bool = False,
+) -> dict:
+    if backend_info["backend_resolved"] == "bbox_rect":
+        return _predict_bbox_rect(sample, backend_info, enable_prompt_stability=enable_prompt_stability)
+    if app is None:
+        raise ValueError(f"backend {backend_info['backend_resolved']} requires an ML backend app")
     response = app._predict(
         {
             "label_config": LABEL_CONFIG,
@@ -139,7 +270,7 @@ def _predict_sample(app: Any, sample: dict) -> dict:
                 {
                     "id": sample.get("sample_id"),
                     "data": {
-                        "image": sample.get("image_path"),
+                        "image": sample.get("resolved_image_path") or sample.get("image_path"),
                         "bbox": sample.get("gt_bbox_xyxy"),
                     },
                 }
@@ -152,9 +283,8 @@ def _predict_sample(app: Any, sample: dict) -> dict:
     meta.setdefault("prompt", "benchmark.gt_bbox")
     meta.setdefault("prompt_box", sample.get("gt_bbox_xyxy"))
     meta.setdefault("prompt_coordinate_system", "pixel_xyxy")
-    mask_quality = meta.get("mask_quality")
-    if isinstance(mask_quality, dict):
-        mask_quality.setdefault("prompt_bbox", sample.get("gt_bbox_xyxy"))
+    meta["backend_requested"] = backend_info["backend_requested"]
+    meta["backend_resolved"] = backend_info["backend_resolved"]
     return prediction
 
 
@@ -165,7 +295,7 @@ def _load_backend_app(backend: str, enable_prompt_stability: bool) -> Any:
     os.environ.setdefault("IMAGE_MODEL_ARTIFACTS_DIR", str(local_state / "image_classifier"))
     os.environ.setdefault("IMAGE_SEG_MODEL_ARTIFACTS_DIR", str(local_state / "image_segmentation"))
     os.environ.setdefault("IMAGE_LOCAL_FILES_ROOT", str(ROOT / "demo_data" / "local-files"))
-    os.environ["IMAGE_SEG_BACKEND"] = _normalize_backend(backend)
+    os.environ["IMAGE_SEG_BACKEND"] = backend
     os.environ["IMAGE_SEG_PROMPT_STABILITY_ENABLED"] = "true" if enable_prompt_stability else "false"
     module_name = f"benchmark_ml_backend_app_{os.getpid()}"
     spec = importlib.util.spec_from_file_location(module_name, ML_APP_PATH)
@@ -175,14 +305,151 @@ def _load_backend_app(backend: str, enable_prompt_stability: bool) -> Any:
     return module
 
 
-def _normalize_backend(value: str) -> str:
-    raw = (value or "placeholder").strip().lower()
-    if raw in {"mobile_sam_or_existing_backend", "existing", "auto"}:
-        return os.getenv("IMAGE_SEG_BACKEND", "placeholder")
-    return raw
+def _predict_bbox_rect(sample: dict, backend_info: dict, enable_prompt_stability: bool = False) -> dict:
+    width = int(sample["width"])
+    height = int(sample["height"])
+    bbox = clip_xyxy(sample["gt_bbox_xyxy"], width, height)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    x1, y1, x2, y2 = _integer_box(bbox, width, height)
+    mask[y1:y2, x1:x2] = 1
+    mask_box = mask_bbox(mask)
+    rle, encoder = _encode_mask(mask)
+    result = {
+        "id": f"{sample.get('sample_id', 'sample')}_mask",
+        "from_name": "mask_label",
+        "to_name": "image",
+        "type": "brushlabels",
+        "original_width": width,
+        "original_height": height,
+        "image_rotation": 0,
+        "value": {"format": "rle", "rle": rle, "brushlabels": [sample.get("category_name") or "Object"]},
+        "meta": {
+            "prediction_source": "bbox-rect-benchmark-baseline",
+            "backend": "bbox_rect",
+            "backend_requested": backend_info["backend_requested"],
+            "backend_resolved": backend_info["backend_resolved"],
+            "rle_encoder": encoder,
+            "prompt": "benchmark.gt_bbox",
+            "prompt_box": bbox,
+            "prompt_coordinate_system": "pixel_xyxy",
+            "mask_bbox": mask_box,
+        },
+    }
+    _refresh_quality_metadata(result, mask, sample, backend_info)
+    if enable_prompt_stability:
+        result["meta"]["uncertainty"] = _bbox_rect_uncertainty(sample, mask)
+    return {
+        "model_version": "benchmark-bbox-rect-v1",
+        "score": 1.0,
+        "result": [result],
+        "prediction_source": "bbox-rect-benchmark-baseline",
+        "confidence": {
+            "prediction_source": "bbox-rect-benchmark-baseline",
+            "confidence": 1.0,
+            "confidence_bucket": "high",
+            "backend": "bbox_rect",
+            "backend_requested": backend_info["backend_requested"],
+            "backend_resolved": backend_info["backend_resolved"],
+            "prompt": "benchmark.gt_bbox",
+            "prompt_box": bbox,
+            "prompt_coordinate_system": "pixel_xyxy",
+            "model_config": {"backend": "bbox_rect"},
+        },
+    }
 
 
-def _decode_prediction_mask(result: dict, width: int, height: int) -> np.ndarray:
+def _bbox_rect_uncertainty(sample: dict, original_mask: np.ndarray) -> dict:
+    width = int(sample["width"])
+    height = int(sample["height"])
+    variants = generate_bbox_prompt_variants(sample["gt_bbox_xyxy"], width, height)
+    masks = [original_mask]
+    for variant in variants[1:]:
+        mask = np.zeros((height, width), dtype=np.uint8)
+        x1, y1, x2, y2 = _integer_box(variant["bbox"], width, height)
+        mask[y1:y2, x1:x2] = 1
+        masks.append(mask)
+    uncertainty = evaluate_prompt_stability(masks, prompt_variants=variants, image_width=width, image_height=height)[
+        "uncertainty"
+    ]
+    if "disagreement_area" not in uncertainty and uncertainty.get("disagreement_area_ratio") is not None:
+        uncertainty["disagreement_area"] = int(round(float(uncertainty["disagreement_area_ratio"]) * width * height))
+    uncertainty["uncertainty_reason"] = uncertainty.get("reason") or []
+    return uncertainty
+
+
+def _validate_backend_prediction(prediction: dict, backend_info: dict, sample: dict) -> None:
+    source = str(prediction.get("prediction_source") or "")
+    confidence = prediction.get("confidence") if isinstance(prediction.get("confidence"), dict) else {}
+    result = (prediction.get("result") or [{}])[0]
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    if backend_info["backend_resolved"] in SAM_BACKENDS:
+        if source == "placeholder-image-segmentation" or confidence.get("fallback") or meta.get("fallback"):
+            error = confidence.get("backend_error") or meta.get("backend_error") or "backend fell back to placeholder"
+            raise RuntimeError(
+                f"{backend_info['backend_resolved']} benchmark backend failed for {sample.get('sample_id')}: {error}"
+            )
+    meta["backend_requested"] = backend_info["backend_requested"]
+    meta["backend_resolved"] = backend_info["backend_resolved"]
+    if backend_info["backend_resolved"] in SAM_BACKENDS:
+        meta.setdefault("model_config", _model_config_for_backend(backend_info["backend_resolved"]))
+
+
+def _model_config_for_backend(backend: str) -> dict:
+    return {
+        "backend": backend,
+        "model_type": os.getenv("IMAGE_SEG_MODEL_TYPE", ""),
+        "checkpoint": os.getenv("IMAGE_SEG_CHECKPOINT", ""),
+        "model_id": os.getenv("IMAGE_SEG_MODEL_ID", ""),
+        "device": os.getenv("IMAGE_SEG_DEVICE", ""),
+    }
+
+
+def _refresh_quality_metadata(result: dict, mask: np.ndarray, sample: dict, backend_info: dict) -> None:
+    meta = result.setdefault("meta", {})
+    width = int(sample["width"])
+    height = int(sample["height"])
+    prompt_bbox = meta.get("prompt_box") or sample.get("gt_bbox_xyxy")
+    if prompt_bbox is None and meta.get("prompt") == "benchmark.gt_bbox":
+        raise ValueError(f"missing benchmark prompt bbox for {sample.get('sample_id')}")
+    prompt_bbox = clip_xyxy(prompt_bbox, width, height)
+    model_bbox = mask_bbox(mask)
+    rle = (result.get("value") or {}).get("rle")
+    quality = evaluate_segmentation_quality(
+        mask,
+        width,
+        height,
+        prompt_bbox=prompt_bbox,
+        mask_bbox=model_bbox,
+        rle_length=len(rle) if isinstance(rle, list) else None,
+        backend_metadata=meta,
+    )
+    meta.update(
+        {
+            "backend_requested": backend_info["backend_requested"],
+            "backend_resolved": backend_info["backend_resolved"],
+            "prompt": "benchmark.gt_bbox",
+            "prompt_box": prompt_bbox,
+            "prompt_coordinate_system": "pixel_xyxy",
+            "mask_bbox": model_bbox,
+        }
+    )
+    uncertainty = meta.get("uncertainty") if isinstance(meta.get("uncertainty"), dict) else None
+    if uncertainty is not None:
+        uncertainty.setdefault("uncertainty_reason", uncertainty.get("reason") or [])
+        if "disagreement_area" not in uncertainty and uncertainty.get("disagreement_area_ratio") is not None:
+            uncertainty["disagreement_area"] = int(
+                round(float(uncertainty["disagreement_area_ratio"]) * width * height)
+            )
+    meta.update(quality)
+    result["original_width"] = width
+    result["original_height"] = height
+
+
+def _decode_prediction_mask(result: dict) -> np.ndarray:
+    width = int(result.get("original_width") or 0)
+    height = int(result.get("original_height") or 0)
+    if width <= 0 or height <= 0:
+        raise ValueError("prediction result must include positive original_width/original_height")
     value = result.get("value") if isinstance(result.get("value"), dict) else {}
     rle = value.get("rle")
     encoder = (result.get("meta") or {}).get("rle_encoder")
@@ -212,6 +479,98 @@ def _decode_minimal_rle(rle: Any, width: int, height: int) -> np.ndarray:
     return np.asarray(values[:total], dtype=np.uint8).reshape((height, width))
 
 
+def _rewrite_result_mask(result: dict, mask: np.ndarray, width: int, height: int, model_bbox: list[float] | None) -> None:
+    rle, encoder = _encode_mask(mask)
+    result["original_width"] = width
+    result["original_height"] = height
+    result.setdefault("value", {})["rle"] = rle
+    result.setdefault("value", {})["format"] = "rle"
+    result.setdefault("meta", {})["rle_encoder"] = encoder
+    result["meta"]["mask_bbox"] = model_bbox
+
+
+def _encode_mask(mask: np.ndarray) -> tuple[list[int], str]:
+    try:
+        from label_studio_converter.brush import mask2rle
+
+        return mask2rle((np.asarray(mask) > 0).astype(np.uint8)), "label-studio-converter"
+    except Exception:
+        return _minimal_rle(mask), "fallback-minimal"
+
+
+def _minimal_rle(mask: np.ndarray) -> list[int]:
+    runs: list[int] = []
+    current = 0
+    length = 0
+    for value in (np.asarray(mask) > 0).astype(np.uint8).reshape(-1):
+        value = int(value)
+        if value == current:
+            length += 1
+        else:
+            runs.append(length)
+            current = value
+            length = 1
+    runs.append(length)
+    return runs
+
+
+def _resize_mask_to_shape(mask: np.ndarray, width: int, height: int) -> np.ndarray:
+    try:
+        from PIL import Image
+
+        image = Image.fromarray((np.asarray(mask) > 0).astype(np.uint8) * 255)
+        resized = image.resize((width, height), resample=Image.Resampling.NEAREST)
+        return (np.asarray(resized) > 0).astype(np.uint8)
+    except Exception as exc:
+        raise ValueError(f"could not resize prediction mask to {width}x{height}: {exc}") from exc
+
+
+def _integer_box(bbox: list[float], width: int, height: int) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = bbox
+    left = max(0, min(width - 1, int(np.floor(x1))))
+    top = max(0, min(height - 1, int(np.floor(y1))))
+    right = max(left + 1, min(width, int(np.ceil(x2))))
+    bottom = max(top + 1, min(height, int(np.ceil(y2))))
+    return left, top, right, bottom
+
+
+def _normalize_sample_paths(sample: dict) -> dict:
+    row = dict(sample)
+    path = Path(str(row.get("image_path") or ""))
+    resolved = path if path.is_absolute() else ROOT / path
+    if not resolved.exists():
+        raise FileNotFoundError(f"benchmark image file not found: {row.get('image_path')}")
+    _validate_image_size(resolved, int(row["width"]), int(row["height"]))
+    row["resolved_image_path"] = str(resolved)
+    return row
+
+
+def _validate_image_size(path: Path, width: int, height: int) -> None:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            actual = (int(image.width), int(image.height))
+    except Exception as exc:
+        raise ValueError(f"could not read benchmark image size for {path}: {exc}") from exc
+    if actual != (width, height):
+        raise ValueError(f"image size mismatch for {path}: manifest={width}x{height}, file={actual[0]}x{actual[1]}")
+
+
+def _validate_prompt_box(bbox: Any, width: int, height: int) -> None:
+    _validate_bbox_in_bounds("prompt_box", bbox, width, height)
+
+
+def _validate_bbox_in_bounds(name: str, bbox: Any, width: int, height: int, tolerance: float = 1e-3) -> None:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        raise ValueError(f"{name} must be a 4-item bbox")
+    x1, y1, x2, y2 = [float(value) for value in bbox]
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"{name} has non-positive area: {bbox}")
+    if x1 < -tolerance or y1 < -tolerance or x2 > width + tolerance or y2 > height + tolerance:
+        raise ValueError(f"{name} out of image bounds {width}x{height}: {bbox}")
+
+
 def _read_jsonl(path: str) -> list[dict]:
     rows = []
     with Path(path).open("r", encoding="utf-8") as f:
@@ -221,10 +580,62 @@ def _read_jsonl(path: str) -> list[dict]:
     return rows
 
 
+def _load_resume_predictions(path: Path) -> tuple[dict[str, dict], list[str]]:
+    if not path.exists():
+        return {}, []
+    rows: dict[str, dict] = {}
+    warnings: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    warnings.append(f"resume_predictions_json_decode_warning_line_{line_number}")
+                    continue
+                sample_id = row.get("sample_id")
+                if not sample_id:
+                    warnings.append(f"resume_predictions_missing_sample_id_line_{line_number}")
+                    continue
+                rows.setdefault(str(sample_id), row)
+    except OSError as exc:
+        warnings.append(f"resume_predictions_read_warning: {exc}")
+    return rows, warnings
+
+
+def _dedupe_rows(rows: list[dict], key: str) -> list[dict]:
+    seen = set()
+    out = []
+    for row in rows:
+        value = row.get(key)
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(row)
+    return out
+
+
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _checkpoint_partial_outputs(
+    predictions_path: Path,
+    corrections_path: Path,
+    prediction_rows: list[dict],
+    correction_rows: list[dict],
+) -> None:
+    _write_jsonl(predictions_path, _dedupe_rows(prediction_rows, "sample_id"))
+    _write_jsonl(corrections_path, _dedupe_rows(correction_rows, "sample_id"))
+
+
+def _print_progress(index: int, total: int, sample_id: Any, resumed: bool) -> None:
+    action = "resumed" if resumed else "predicted"
+    print(f"[{action}] {index}/{total} sample_id={sample_id}", flush=True)
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -236,15 +647,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Benchmark v0.1 on a manifest.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--backend", default="placeholder")
+    parser.add_argument("--backend", required=True, choices=BACKEND_CHOICES)
     parser.add_argument("--enable-prompt-stability", default="false")
     parser.add_argument("--risk-model-dir")
+    parser.add_argument("--max-samples", type=int)
+    parser.add_argument("--resume", default="false")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     enabled = str(args.enable_prompt_stability).strip().lower() in {"1", "true", "yes", "on"}
+    resume = str(args.resume).strip().lower() in {"1", "true", "yes", "on"}
     try:
         summary = run_benchmark(
             args.manifest,
@@ -252,6 +666,8 @@ def main(argv: list[str] | None = None) -> int:
             backend=args.backend,
             enable_prompt_stability=enabled,
             risk_model_dir=args.risk_model_dir,
+            max_samples=args.max_samples,
+            resume=resume,
         )
     except Exception as exc:
         print(f"[ERROR] {exc}")
