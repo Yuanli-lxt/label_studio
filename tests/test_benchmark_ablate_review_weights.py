@@ -9,6 +9,8 @@ from image_segmentation.benchmark.ablate_review_weights import (
     load_weight_presets,
     normalize_preset_weights,
 )
+from image_segmentation.benchmark.diagnose_prediction_features import diagnose_prediction_features
+from image_segmentation.benchmark.learn_boundary_shape_fusion import learn_boundary_shape_fusion
 
 
 def item(idx, major, priority=0.0, components=None):
@@ -26,6 +28,19 @@ def item(idx, major, priority=0.0, components=None):
         }
         if components is None
         else components,
+        "prediction_features": {
+            "pred_area_ratio": 0.005 if major else 0.08,
+            "pred_bbox_area_ratio": 0.02 if major else 0.09,
+            "pred_extent": 0.35 if major else 0.9,
+            "pred_aspect_ratio": 6.0 if major else 1.2,
+            "pred_touches_border": bool(major),
+            "pred_boundary_complexity": 8.0 if major else 1.1,
+            "pred_boundary_density": 12.0 if major else 2.0,
+            "pred_component_count": 3 if major else 1,
+            "pred_largest_component_ratio": 0.55 if major else 1.0,
+            "pred_hole_count": 1 if major else 0,
+            "pred_thinness_proxy": 0.75 if major else 0.1,
+        },
         "evaluation_only": {"delta": {"major_correction": major}},
     }
 
@@ -55,6 +70,8 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
             "no_diversity",
             "balanced_no_risk",
             "boundary_shape_experimental",
+            "boundary_shape_rank_score",
+            "boundary_shape_calibrated_score",
         ]:
             self.assertIn(name, DEFAULT_PRESETS)
 
@@ -143,8 +160,20 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
                 "major_correction_base_rate",
                 "positive_count",
                 "n_samples",
+                "roc_auc_for_major_correction",
+                "brier_score_for_major_correction",
             ]:
                 self.assertIn(field, row)
+
+    def test_ablate_review_weights_includes_boundary_shape_variants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue = write_queue(root, self.rows())
+            result = ablate_review_weights(str(queue), str(root / "out"))
+            self.assertIn("boundary_shape_rank_score", result["presets"])
+            self.assertIn("boundary_shape_calibrated_score", result["presets"])
+            ranked = read_jsonl(root / "out" / "preset_rankings" / "boundary_shape_calibrated_score.review_queue.jsonl")
+            self.assertIn("boundary_shape_calibrated_score", ranked[0]["ablation_score_components"])
 
     def test_boundary_shape_experimental_preset_schema(self):
         weights = normalize_preset_weights(DEFAULT_PRESETS["boundary_shape_experimental"])
@@ -188,6 +217,48 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
             ablate_review_weights(str(queue), str(root / "out"))
             ranked = read_jsonl(root / "out" / "preset_rankings" / "boundary_shape_experimental.review_queue.jsonl")
             self.assertEqual(ranked[0]["ablation_priority_score"], ranked[1]["ablation_priority_score"])
+
+    def test_calibrated_boundary_ablation_does_not_use_evaluation_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = item(1, False, priority=0.5)
+            changed = json.loads(json.dumps(base))
+            changed["task_id"] = "s2"
+            changed["evaluation_only"] = {
+                "delta": {
+                    "major_correction": True,
+                    "model_human_iou": 0.0,
+                    "model_human_dice": 0.0,
+                    "boundary": {"boundary_iou": 0.0, "boundary_f1": 0.0},
+                }
+            }
+            changed["boundary_metadata"] = {"thin_structure_score": 999.0}
+            queue = write_queue(root, [base, changed])
+            ablate_review_weights(str(queue), str(root / "out"))
+            ranked = read_jsonl(root / "out" / "preset_rankings" / "boundary_shape_calibrated_score.review_queue.jsonl")
+            self.assertEqual(ranked[0]["ablation_priority_score"], ranked[1]["ablation_priority_score"])
+
+    def test_prediction_feature_diagnostics_outputs_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue = write_queue(root, self.rows())
+            result = diagnose_prediction_features(str(queue), str(root / "diag"))
+            self.assertTrue((root / "diag" / "prediction_feature_diagnostics.json").exists())
+            self.assertTrue((root / "diag" / "prediction_feature_diagnostics.md").exists())
+            self.assertIn("pred_boundary_complexity", result["features"])
+
+    def test_learn_boundary_shape_fusion_outputs_oof_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = [item(i, i in {2, 4, 6, 8}, priority=i / 12) for i in range(1, 13)]
+            queue = write_queue(root, rows)
+            result = learn_boundary_shape_fusion(str(queue), str(root / "learned"), n_splits=3)
+            self.assertTrue((root / "learned" / "learned_boundary_shape_fusion.json").exists())
+            self.assertIn("learned_boundary_shape_only", result["experiments"])
+            self.assertTrue(result["experiments"]["learned_boundary_shape_only"]["oof"])
+            feature_text = "\n".join(result["feature_sets"]["learned_current_plus_boundary_shape"])
+            self.assertNotIn("major_correction", feature_text)
+            self.assertNotIn("model_human_iou", feature_text)
 
     def test_ablation_bootstrap_ci_present(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1005,6 +1005,18 @@ The benchmark also records prediction-time boundary/shape features derived only 
 
 These features are stored in `prediction_features` and `mask_quality.prediction_time_boundary_shape`. They are safe candidates for Layer 5 priority experiments because they do not use GT masks, IoU/Dice, boundary deltas, correction labels, or human masks.
 
+Evaluation-only fields include `boundary_metadata`, `evaluation_only.delta`, IoU/Dice, boundary IoU/F1/precision/recall, correction deltas, correction severity, and the `major_correction` label. They may be used for offline diagnostics and evaluation labels, but must not become production scoring or learned-fusion input features.
+
+Run prediction-time feature diagnostics:
+
+```bash
+python -m image_segmentation.benchmark.diagnose_prediction_features \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu/review_queue.jsonl \
+  --output-dir /tmp/dis5k300_boundary_shape_diagnostics
+```
+
+Outputs are `prediction_feature_diagnostics.json`, `prediction_feature_diagnostics.md`, and `prediction_feature_bins.jsonl`. The report includes missingness, quantiles, univariate AP/ROC-AUC/PR-AUC, Spearman rank correlation, binned major-correction rates, and a direction suggestion for each feature.
+
 ### OOF Risk Evaluation
 
 ```bash
@@ -1036,7 +1048,19 @@ python -m image_segmentation.benchmark.ablate_review_weights \
 
 Focus on `current_full_priority`, `risk_heavy`, `risk_only`, and `no_diversity`.
 
-The `boundary_shape_experimental` preset adds a nonzero `boundary_shape_score` component while leaving the default Layer 5 weights unchanged. Use it only as an experimental comparison until it is stable across datasets.
+The `boundary_shape_experimental` preset adds a nonzero `boundary_shape_score` component while leaving the default Layer 5 weights unchanged. `boundary_shape_rank_score` and `boundary_shape_calibrated_score` compare rank-normalized and robust log/clipped prediction-time boundary scores. These are experimental comparisons only; do not treat them as production defaults until they are stable across datasets.
+
+Run leakage-safe OOF learned fusion:
+
+```bash
+python -m image_segmentation.benchmark.learn_boundary_shape_fusion \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu/review_queue.jsonl \
+  --output-dir /tmp/dis5k300_boundary_shape_learned_fusion \
+  --n-splits 5 \
+  --random-seed 42
+```
+
+The learned fusion compares `current_full_priority`, `risk_only`, `risk_heavy`, `boundary_shape_experimental`, `boundary_shape_rank_score`, `boundary_shape_calibrated_score`, `learned_boundary_shape_only`, and `learned_current_plus_boundary_shape`. Each fold fits scaler/model only on the train fold and predicts the held-out fold. If scikit-learn is unavailable, a numpy logistic fallback is used.
 
 ### Three-Way Comparison
 

@@ -157,6 +157,10 @@ class SegmentationReviewQueueTests(unittest.TestCase):
         first = self.module.score_review_candidate(base, weights=weights)
         second = self.module.score_review_candidate(changed, weights=weights)
         self.assertEqual(first["priority_score"], second["priority_score"])
+        self.assertEqual(
+            first["score_components"]["boundary_shape_calibrated_score"],
+            second["score_components"]["boundary_shape_calibrated_score"],
+        )
         self.assertNotIn("boundary_metadata", first["source_metadata"])
 
     def test_missing_prediction_features_backward_compatible(self):

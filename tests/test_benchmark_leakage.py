@@ -14,6 +14,8 @@ if str(TRAINER_DIR) not in sys.path:
 from segmentation_correction_risk import FEATURE_NAMES  # noqa: E402
 from segmentation_review_queue import score_review_candidate  # noqa: E402
 from image_segmentation.benchmark import sampling  # noqa: E402
+from image_segmentation.benchmark.learn_boundary_shape_fusion import BOUNDARY_FEATURES, CURRENT_PLUS_FEATURES  # noqa: E402
+from image_segmentation.benchmark.prediction_feature_scoring import assert_no_leaky_feature_names  # noqa: E402
 
 
 LEAKY_TOKENS = {
@@ -97,6 +99,12 @@ class BenchmarkLeakageTests(unittest.TestCase):
         self.assertEqual(first["score_components"], second["score_components"])
         self.assertNotIn("boundary_metadata", first["source_metadata"])
         self.assertNotIn("boundary_metadata", second["source_metadata"])
+
+    def test_learned_boundary_feature_sets_reject_gt_derived_fields(self):
+        assert_no_leaky_feature_names(BOUNDARY_FEATURES)
+        assert_no_leaky_feature_names(CURRENT_PLUS_FEATURES)
+        with self.assertRaises(ValueError):
+            assert_no_leaky_feature_names(["pred_area_ratio", "model_human_iou"])
 
     def test_manifest_does_not_use_delta_fields_for_sampling(self):
         source = inspect.getsource(sampling.sample_manifest_rows)

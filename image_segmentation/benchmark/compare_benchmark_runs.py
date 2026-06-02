@@ -73,7 +73,15 @@ def render_multi_markdown(runs: list[dict], recommendation: str) -> str:
     lines.append(f"- risk_heavy beats current across all runs: {_bool_text(all(_beats_current(run, 'risk_heavy') for run in runs))}")
     lines.append(f"- risk_only remains strongest across all runs: {_bool_text(all(_is_best(run, 'risk_only') for run in runs))}")
     lines.extend(["", "| preset metric | " + " | ".join(names) + " |", "| --- | " + " | ".join(["---:"] * len(runs)) + " |"])
-    for preset in ["current_full_priority", "risk_heavy", "risk_only", "no_diversity", "boundary_shape_experimental"]:
+    for preset in [
+        "current_full_priority",
+        "risk_heavy",
+        "risk_only",
+        "no_diversity",
+        "boundary_shape_experimental",
+        "boundary_shape_rank_score",
+        "boundary_shape_calibrated_score",
+    ]:
         for metric in ["average_precision_for_major_correction", "lift_at_20_percent_over_random"]:
             lines.append("| " + f"{preset} {metric}" + " | " + " | ".join(_fmt(_preset_metric(run, preset, metric)) for run in runs) + " |")
     lines.extend(["", "## Failure-Mode Comparison"])
@@ -209,7 +217,17 @@ def _metric_rows(left: dict, right: dict, metrics: list[tuple[str, str]]) -> lis
 
 def _strategy_rows(left: dict, right: dict) -> list[str]:
     rows = []
-    for preset in ["current_full_priority", "risk_only", "risk_heavy", "risk_dominant", "no_diversity", "balanced_no_risk", "boundary_shape_experimental"]:
+    for preset in [
+        "current_full_priority",
+        "risk_only",
+        "risk_heavy",
+        "risk_dominant",
+        "no_diversity",
+        "balanced_no_risk",
+        "boundary_shape_experimental",
+        "boundary_shape_rank_score",
+        "boundary_shape_calibrated_score",
+    ]:
         for metric in ["average_precision_for_major_correction", "lift_at_20_percent_over_random"]:
             rows.append(f"| {preset} {metric} | {_fmt(_preset_metric(left, preset, metric))} | {_fmt(_preset_metric(right, preset, metric))} |")
     return rows

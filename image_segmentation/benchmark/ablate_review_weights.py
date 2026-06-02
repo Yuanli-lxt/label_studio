@@ -14,6 +14,10 @@ from image_segmentation.benchmark.evaluation import (
     precision_at_fraction,
     recall_at_fraction,
 )
+from image_segmentation.benchmark.prediction_feature_scoring import (
+    calibrated_boundary_shape_score,
+    rank_boundary_shape_scores,
+)
 
 
 COMPONENTS = [
@@ -94,6 +98,26 @@ DEFAULT_PRESETS = {
         "boundary_shape_score": 0.20,
         "diversity_score": 0.10,
         "description": "Experimental prediction-time boundary/shape fusion; does not use GT boundary metadata or delta metrics.",
+    },
+    "boundary_shape_rank_score": {
+        "correction_risk_score": 0.25,
+        "uncertainty_score": 0.10,
+        "rule_review_score": 0.20,
+        "geometry_complexity_score": 0.15,
+        "boundary_shape_score": 0.20,
+        "diversity_score": 0.10,
+        "boundary_shape_component": "boundary_shape_rank_score",
+        "description": "Experimental rank-normalized prediction-time boundary/shape score.",
+    },
+    "boundary_shape_calibrated_score": {
+        "correction_risk_score": 0.25,
+        "uncertainty_score": 0.10,
+        "rule_review_score": 0.20,
+        "geometry_complexity_score": 0.15,
+        "boundary_shape_score": 0.20,
+        "diversity_score": 0.10,
+        "boundary_shape_component": "boundary_shape_calibrated_score",
+        "description": "Experimental robust prediction-time boundary/shape score with log clipping and neutral missing fill.",
     },
 }
 
@@ -186,13 +210,17 @@ def rank_for_preset(items: list[dict], preset_name: str, preset: dict) -> tuple[
     weights = normalize_preset_weights(preset)
     warnings = []
     ranked = []
+    rank_scores = rank_boundary_shape_scores(items)
     for index, item in enumerate(items):
         row = dict(item)
-        components, component_warnings = _component_values(item)
+        components, component_warnings = _component_values(item, rank_scores[index] if index < len(rank_scores) else None)
         warnings.extend(component_warnings)
         if preset.get("use_existing_priority_score") is True:
             score = _clip(_num(item.get("priority_score")))
         else:
+            boundary_component = preset.get("boundary_shape_component")
+            if boundary_component:
+                components["boundary_shape_score"] = components.get(str(boundary_component), 0.0)
             score = sum(components[name] * weights.get(name, 0.0) for name in COMPONENTS)
             score = _clip(score)
         row["ablation_preset"] = preset_name
@@ -208,7 +236,7 @@ def rank_for_preset(items: list[dict], preset_name: str, preset: dict) -> tuple[
     return ranked, sorted(set(warnings))
 
 
-def _component_values(item: dict) -> tuple[dict, list[str]]:
+def _component_values(item: dict, rank_score: float | None = None) -> tuple[dict, list[str]]:
     raw = item.get("score_components") if isinstance(item.get("score_components"), dict) else {}
     values = {}
     warnings = []
@@ -222,12 +250,20 @@ def _component_values(item: dict) -> tuple[dict, list[str]]:
         if number < 0.0 or number > 1.0:
             warnings.append(f"clipped_{name}")
         values[name] = _clip(number)
+    values["boundary_shape_rank_score"] = _clip(_num(rank_score))
+    calibrated = raw.get("boundary_shape_calibrated_score")
+    if not isinstance(calibrated, (int, float)):
+        calibrated = calibrated_boundary_shape_score(item)
+    values["boundary_shape_calibrated_score"] = _clip(_num(calibrated))
     return values, warnings
 
 
 def metrics_for_ranked(items: list[dict], base_rate: float | None = None) -> dict:
     top20 = _top_fraction(items, 0.20)
     positives = sum(1 for item in items if _is_major(item))
+    labels = [1 if _is_major(item) else 0 for item in items]
+    scores = [_num(item.get("ablation_priority_score", item.get("priority_score"))) for item in items]
+    binary = _binary_metrics(labels, scores)
     return {
         "n_samples": len(items),
         "positive_count": positives,
@@ -239,6 +275,8 @@ def metrics_for_ranked(items: list[dict], base_rate: float | None = None) -> dic
         "lift_at_10_percent_over_random": lift_at_fraction(items, 0.10),
         "lift_at_20_percent_over_random": lift_at_fraction(items, 0.20),
         "average_precision_for_major_correction": average_precision(items),
+        "roc_auc_for_major_correction": binary.get("roc_auc"),
+        "brier_score_for_major_correction": binary.get("brier_score"),
         "top_20_percent_major_correction_count": sum(1 for item in top20 if _is_major(item)),
         "top_20_percent_size": len(top20),
         "meets_initial_standard": bool(
@@ -299,6 +337,8 @@ def pairwise_comparisons(results: dict) -> dict:
         ("balanced_no_risk", "current_full_priority"),
         ("boundary_shape_experimental", "current_full_priority"),
         ("boundary_shape_experimental", "risk_heavy"),
+        ("boundary_shape_rank_score", "current_full_priority"),
+        ("boundary_shape_calibrated_score", "current_full_priority"),
     ]
     out = {}
     for left, right in pairs:
@@ -321,6 +361,8 @@ def topk_overlaps(ranked_by_preset: dict[str, list[dict]]) -> dict:
         ("risk_heavy", "risk_only"),
         ("current_full_priority", "boundary_shape_experimental"),
         ("risk_heavy", "boundary_shape_experimental"),
+        ("current_full_priority", "boundary_shape_rank_score"),
+        ("current_full_priority", "boundary_shape_calibrated_score"),
     ]
     out = {}
     for left, right in pairs:
@@ -417,8 +459,8 @@ def render_markdown(report: dict) -> str:
         *_leaderboard_lines(report.get("leaderboard_by_lift_at_20") or []),
         "",
         "## Metrics",
-        "| preset | precision@20 | recall@20 | lift@20 | AP | lift@20 CI | top20 major | meets initial standard |",
-        "| --- | ---: | ---: | ---: | ---: | --- | ---: | --- |",
+        "| preset | precision@20 | recall@20 | lift@20 | AP | ROC-AUC | Brier | lift@20 CI | top20 major | meets initial standard |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |",
     ]
     for name, row in (report.get("presets") or {}).items():
         label = name
@@ -431,6 +473,7 @@ def render_markdown(report: dict) -> str:
         lines.append(
             f"| {label} | {_fmt(row.get('precision_at_20_percent'))} | {_fmt(row.get('recall_at_20_percent'))} | "
             f"{_fmt(row.get('lift_at_20_percent_over_random'))} | {_fmt(row.get('average_precision_for_major_correction'))} | "
+            f"{_fmt(row.get('roc_auc_for_major_correction'))} | {_fmt(row.get('brier_score_for_major_correction'))} | "
             f"{ci_text} | {row.get('top_20_percent_major_correction_count')} | {row.get('meets_initial_standard')} |"
         )
     lines.extend([
@@ -556,6 +599,22 @@ def _correlation(values: list[float], labels: list[float]) -> float | None:
     if denom_x == 0 or denom_y == 0:
         return None
     return float(numerator / (denom_x * denom_y))
+
+
+def _binary_metrics(labels: list[int], scores: list[float]) -> dict:
+    if not labels:
+        return {"roc_auc": None, "brier_score": None}
+    brier = sum((score - label) ** 2 for score, label in zip(scores, labels)) / len(labels)
+    positives = [score for label, score in zip(labels, scores) if label]
+    negatives = [score for label, score in zip(labels, scores) if not label]
+    if not positives or not negatives:
+        return {"roc_auc": None, "brier_score": float(brier)}
+    wins = 0.0
+    total = len(positives) * len(negatives)
+    for pos in positives:
+        for neg in negatives:
+            wins += 1.0 if pos > neg else 0.5 if pos == neg else 0.0
+    return {"roc_auc": float(wins / total), "brier_score": float(brier)}
 
 
 def _percentile(values: list[float], percentile: float) -> float | None:

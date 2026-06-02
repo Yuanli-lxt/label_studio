@@ -5,6 +5,12 @@ import os
 from collections import Counter
 from typing import Any, Optional
 
+from image_segmentation.benchmark.prediction_feature_scoring import (
+    boundary_shape_score_from_features,
+    calibrated_boundary_shape_score,
+    prediction_features,
+)
+
 
 DEFAULT_SCORE_WEIGHTS = {
     "correction_risk_score": 0.35,
@@ -53,6 +59,7 @@ def score_review_candidate(
         "rule_review_score": _rule_review_score(record),
         "geometry_complexity_score": _geometry_complexity_score(record),
         "boundary_shape_score": _boundary_shape_score(record),
+        "boundary_shape_calibrated_score": calibrated_boundary_shape_score(record),
         "diversity_score": 0.0,
     }
     reasons = _review_reasons(record, correction_risk, components)
@@ -299,45 +306,11 @@ def _geometry_complexity_score(record: dict) -> float:
 
 
 def _boundary_shape_score(record: dict) -> float:
-    features = _prediction_features(record)
-    if not features:
-        return 0.0
-    score = 0.0
-    area = _num(features.get("pred_area_ratio"))
-    extent = _num(features.get("pred_extent"))
-    aspect = _num(features.get("pred_aspect_ratio"))
-    complexity = _num(features.get("pred_boundary_complexity"))
-    density = _num(features.get("pred_boundary_density"))
-    components = _num(features.get("pred_component_count"))
-    largest_ratio = _num(features.get("pred_largest_component_ratio"))
-    holes = _num(features.get("pred_hole_count"))
-    thinness = _num(features.get("pred_thinness_proxy"))
-    if area > 0 and area < 0.01:
-        score += 0.12
-    if features.get("pred_touches_border") is True:
-        score += 0.12
-    if extent > 0:
-        score += 0.16 * (1.0 - _clamp(extent))
-    if aspect > 0 and (aspect > 4.0 or aspect < 0.25):
-        score += 0.12
-    score += 0.18 * _clamp((complexity - 1.0) / 12.0)
-    score += 0.14 * _clamp(density / 18.0)
-    if components > 1:
-        score += 0.12 * _clamp((components - 1.0) / 5.0)
-    if largest_ratio > 0:
-        score += 0.08 * (1.0 - _clamp(largest_ratio))
-    if holes > 0:
-        score += 0.06 * _clamp(holes / 5.0)
-    score += 0.18 * _clamp(thinness)
-    return _clamp(score)
+    return boundary_shape_score_from_features(_prediction_features(record))
 
 
 def _prediction_features(record: dict) -> dict:
-    features = record.get("prediction_features") if isinstance(record.get("prediction_features"), dict) else None
-    if features is None:
-        mask_quality = record.get("mask_quality") if isinstance(record.get("mask_quality"), dict) else {}
-        features = mask_quality.get("prediction_time_boundary_shape")
-    return features if isinstance(features, dict) else {}
+    return prediction_features(record)
 
 
 def _review_reasons(record: dict, correction_risk: dict, components: dict) -> list[str]:

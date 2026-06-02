@@ -531,6 +531,18 @@ benchmark 还会记录只来自 predicted mask 和 image size 的 prediction-tim
 
 这些字段写入 `prediction_features` 和 `mask_quality.prediction_time_boundary_shape`。它们可以安全用于 Layer 5 priority 实验，因为不使用 GT mask、IoU/Dice、boundary delta、major correction label 或 human mask。
 
+Evaluation-only 字段包括 `boundary_metadata`、`evaluation_only.delta`、IoU/Dice、boundary IoU/F1/precision/recall、correction delta、correction severity 和 `major_correction` label。它们可以用于离线诊断和评估 label，但不能进入生产 scoring 或 learned-fusion 输入特征。
+
+运行 prediction-time feature diagnostics：
+
+```bash
+python -m image_segmentation.benchmark.diagnose_prediction_features \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu/review_queue.jsonl \
+  --output-dir /tmp/dis5k300_boundary_shape_diagnostics
+```
+
+输出包括 `prediction_feature_diagnostics.json`、`prediction_feature_diagnostics.md` 和 `prediction_feature_bins.jsonl`。报告会统计 missingness、分位数、单变量 AP/ROC-AUC/PR-AUC、Spearman rank correlation、分桶 major-correction rate，以及每个 feature 的方向建议。
+
 ### OOF 风险评估
 
 ```bash
@@ -562,7 +574,19 @@ python -m image_segmentation.benchmark.ablate_review_weights \
 
 重点比较 `current_full_priority`、`risk_heavy`、`risk_only` 和 `no_diversity`。
 
-`boundary_shape_experimental` preset 会给 `boundary_shape_score` 非零权重，但默认 Layer 5 权重保持不变。它只用于实验比较，除非跨数据集稳定，否则不要作为默认。
+`boundary_shape_experimental` preset 会给 `boundary_shape_score` 非零权重，但默认 Layer 5 权重保持不变。`boundary_shape_rank_score` 和 `boundary_shape_calibrated_score` 分别比较 rank-normalized 与 robust log/clipped prediction-time boundary score。它们都只用于实验比较，除非跨数据集稳定，否则不要作为默认。
+
+运行 leakage-safe OOF learned fusion：
+
+```bash
+python -m image_segmentation.benchmark.learn_boundary_shape_fusion \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu/review_queue.jsonl \
+  --output-dir /tmp/dis5k300_boundary_shape_learned_fusion \
+  --n-splits 5 \
+  --random-seed 42
+```
+
+learned fusion 会比较 `current_full_priority`、`risk_only`、`risk_heavy`、`boundary_shape_experimental`、`boundary_shape_rank_score`、`boundary_shape_calibrated_score`、`learned_boundary_shape_only` 和 `learned_current_plus_boundary_shape`。每个 fold 的 scaler/model 只在 train fold fit，validation fold 只 transform/predict；如果没有 scikit-learn，会使用 numpy logistic fallback。
 
 ### 三方比较
 
