@@ -166,7 +166,14 @@ def _preflight_mask_folder(dataset_name: str, dataset_config: dict, benchmark_id
         return
     image_glob = str(dataset_config.get("image_glob") or "*.*")
     mask_glob = str(dataset_config.get("mask_glob") or "*.png")
-    stats = mask_folder_stats(images_dir, masks_dir, image_glob=image_glob, mask_glob=mask_glob)
+    mask_match_strategy = str(dataset_config.get("mask_match_strategy") or "same_stem")
+    stats = mask_folder_stats(
+        images_dir,
+        masks_dir,
+        image_glob=image_glob,
+        mask_glob=mask_glob,
+        mask_match_strategy=mask_match_strategy,
+    )
     report["n_images_found"] = stats["n_images_found"]
     report["n_annotations_or_masks_found"] = stats["n_masks_found"]
     report["n_images"] = stats["n_images_found"]
@@ -203,6 +210,7 @@ def _preflight_mask_folder(dataset_name: str, dataset_config: dict, benchmark_id
                     max_samples=1,
                     image_glob=image_glob,
                     mask_glob=mask_glob,
+                    mask_match_strategy=mask_match_strategy,
                     category_name=str(dataset_config.get("category_name") or "foreground_object"),
                     category_id=str(dataset_config.get("category_id") or dataset_config.get("category_name") or "foreground_object"),
                     default_difficulty_tags=list(dataset_config.get("default_difficulty_tags") or []),

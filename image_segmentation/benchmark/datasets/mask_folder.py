@@ -22,16 +22,16 @@ def iter_mask_folder_manifest_samples(
     category_id: str | None = None,
     default_difficulty_tags: list[str] | None = None,
 ) -> Iterable[dict]:
-    if mask_match_strategy != "same_stem":
-        raise ValueError("only mask_match_strategy='same_stem' is supported")
+    if mask_match_strategy not in {"same_stem", "same_stem_strip_suffix"}:
+        raise ValueError("mask_match_strategy must be 'same_stem' or 'same_stem_strip_suffix'")
     image_root = Path(images_dir)
     mask_root = Path(masks_dir)
-    masks_by_stem = {path.stem: path for path in sorted(mask_root.glob(mask_glob))}
+    masks_by_stem = _paths_by_match_stem(mask_root, mask_glob, mask_match_strategy)
     count = 0
-    for image_path in sorted(image_root.glob(image_glob)):
+    for image_path in _files_matching(image_root, image_glob):
         if image_path.is_dir():
             continue
-        mask_path = masks_by_stem.get(image_path.stem)
+        mask_path = masks_by_stem.get(_match_stem(image_path, mask_match_strategy))
         if mask_path is None:
             continue
         sample = load_mask_folder_sample(
@@ -105,20 +105,33 @@ def load_mask_folder_sample(
     }
 
 
-def count_pairs(images_dir: str | Path, masks_dir: str | Path, image_glob: str = "*.*", mask_glob: str = "*.png") -> int:
-    image_stems = {path.stem for path in Path(images_dir).glob(image_glob) if path.is_file()}
-    mask_stems = {path.stem for path in Path(masks_dir).glob(mask_glob) if path.is_file()}
+def count_pairs(
+    images_dir: str | Path,
+    masks_dir: str | Path,
+    image_glob: str = "*.*",
+    mask_glob: str = "*.png",
+    mask_match_strategy: str = "same_stem",
+) -> int:
+    image_stems = {_match_stem(path, mask_match_strategy) for path in _files_matching(Path(images_dir), image_glob)}
+    mask_stems = set(_paths_by_match_stem(Path(masks_dir), mask_glob, mask_match_strategy))
     return len(image_stems & mask_stems)
 
 
-def mask_folder_stats(images_dir: str | Path, masks_dir: str | Path, image_glob: str = "*.*", mask_glob: str = "*.png") -> dict:
+def mask_folder_stats(
+    images_dir: str | Path,
+    masks_dir: str | Path,
+    image_glob: str = "*.*",
+    mask_glob: str = "*.png",
+    mask_match_strategy: str = "same_stem",
+) -> dict:
     from PIL import Image
 
     image_root = Path(images_dir)
     mask_root = Path(masks_dir)
-    masks_by_stem = {path.stem: path for path in sorted(mask_root.glob(mask_glob)) if path.is_file()}
+    image_paths = _files_matching(image_root, image_glob)
+    masks_by_stem = _paths_by_match_stem(mask_root, mask_glob, mask_match_strategy)
     stats = {
-        "n_images_found": len([p for p in image_root.glob(image_glob) if p.is_file()]),
+        "n_images_found": len(image_paths),
         "n_masks_found": len(masks_by_stem),
         "n_pairs": 0,
         "missing_mask_count": 0,
@@ -127,14 +140,14 @@ def mask_folder_stats(images_dir: str | Path, masks_dir: str | Path, image_glob:
         "n_empty_masks": 0,
         "n_shape_mismatch": 0,
     }
-    image_stems = {path.stem for path in image_root.glob(image_glob) if path.is_file()}
+    image_stems = {_match_stem(path, mask_match_strategy) for path in image_paths}
     mask_stems = set(masks_by_stem)
     stats["missing_mask_count"] = len(image_stems - mask_stems)
     stats["missing_image_count"] = len(mask_stems - image_stems)
-    for image_path in sorted(image_root.glob(image_glob)):
+    for image_path in image_paths:
         if not image_path.is_file():
             continue
-        mask_path = masks_by_stem.get(image_path.stem)
+        mask_path = masks_by_stem.get(_match_stem(image_path, mask_match_strategy))
         if mask_path is None:
             continue
         stats["n_pairs"] += 1
@@ -150,6 +163,35 @@ def mask_folder_stats(images_dir: str | Path, masks_dir: str | Path, image_glob:
             continue
         stats["n_valid"] += 1
     return stats
+
+
+def _files_matching(root: Path, glob_spec: str) -> list[Path]:
+    patterns = [part.strip() for part in glob_spec.replace(";", ",").split(",") if part.strip()]
+    if not patterns:
+        patterns = ["*.*"]
+    paths: dict[str, Path] = {}
+    for pattern in patterns:
+        for path in root.glob(pattern):
+            if path.is_file():
+                paths[str(path)] = path
+    return sorted(paths.values())
+
+
+def _paths_by_match_stem(root: Path, glob_spec: str, strategy: str) -> dict[str, Path]:
+    out: dict[str, Path] = {}
+    for path in _files_matching(root, glob_spec):
+        out.setdefault(_match_stem(path, strategy), path)
+    return out
+
+
+def _match_stem(path: Path, strategy: str) -> str:
+    stem = path.stem
+    if strategy == "same_stem_strip_suffix":
+        lowered = stem.lower()
+        for suffix in ("_mask", "-mask", "_gt", "-gt", "_label", "-label", "_seg", "-seg"):
+            if lowered.endswith(suffix):
+                return stem[: -len(suffix)]
+    return stem
 
 
 def _mask_difficulty_tags(

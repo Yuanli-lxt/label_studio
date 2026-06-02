@@ -180,6 +180,8 @@ def _queue_item(
         "prediction_id": record.get("prediction_id"),
         "model_version": record.get("model_version"),
         "label": record.get("label") or "Object",
+        "mask_quality": record.get("mask_quality"),
+        "prediction_features": record.get("prediction_features"),
         "priority_score": priority,
         "priority_bucket": _priority_bucket(priority),
         "review_weight_preset": weight_preset,

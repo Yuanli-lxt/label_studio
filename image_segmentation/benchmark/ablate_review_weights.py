@@ -20,6 +20,16 @@ from image_segmentation.benchmark.prediction_feature_scoring import (
 )
 
 
+ABLATION_BOOTSTRAP_METRICS = list(
+    dict.fromkeys(
+        list(BOOTSTRAP_METRICS)
+        + [
+            "roc_auc_for_major_correction",
+            "brier_score_for_major_correction",
+        ]
+    )
+)
+
 COMPONENTS = [
     "correction_risk_score",
     "uncertainty_score",
@@ -158,6 +168,14 @@ def ablate_review_weights(
         metrics["available"] = True
         results[preset_name] = metrics
     pairwise = pairwise_comparisons(results)
+    ci_report = None
+    if bootstrap_iters:
+        ci_report = bootstrap_ci_report(
+            ranked_by_preset,
+            int(bootstrap_iters),
+            int(random_seed),
+            baseline_preset="current_full_priority",
+        )
     overlaps = topk_overlaps(ranked_by_preset)
     recommendation_text = recommendation(results)
     report = {
@@ -171,13 +189,19 @@ def ablate_review_weights(
         "leaderboard_by_ap": _leaderboard(results, "average_precision_for_major_correction"),
         "leaderboard_by_lift_at_20": _leaderboard(results, "lift_at_20_percent_over_random"),
         "pairwise_comparison": pairwise,
+        "bootstrap_ci": ci_report,
         "topk_overlap": overlaps,
         "component_diagnostics": diagnostics,
         "recommendation": recommendation_text,
         "warnings": warnings,
     }
     _write_json(output / "weight_ablation.json", report)
+    _write_json(output / "ablation_results.json", report)
+    if ci_report is not None:
+        _write_json(output / "bootstrap_ci.json", ci_report)
+        (output / "bootstrap_ci.md").write_text(render_bootstrap_markdown(ci_report), encoding="utf-8")
     (output / "weight_ablation.md").write_text(render_markdown(report), encoding="utf-8")
+    (output / "ablation_results.md").write_text(render_markdown(report), encoding="utf-8")
     return report
 
 
@@ -291,31 +315,21 @@ def metrics_for_ranked(items: list[dict], base_rate: float | None = None) -> dic
 def bootstrap_ci(items: list[dict], preset_name: str, bootstrap_iters: int, random_seed: int) -> dict:
     labels = [_is_major(item) for item in items]
     if len(set(labels)) < 2:
-        return {name: {"value": None, "ci95_low": None, "ci95_high": None, "warning": "degenerate_labels"} for name in BOOTSTRAP_METRICS}
+        return {name: {"value": None, "ci95_low": None, "ci95_high": None, "warning": "degenerate_labels"} for name in ABLATION_BOOTSTRAP_METRICS}
     rng = random.Random(random_seed + sum(ord(ch) for ch in preset_name))
-    values = {name: [] for name in BOOTSTRAP_METRICS}
+    values = {name: [] for name in ABLATION_BOOTSTRAP_METRICS}
     for _ in range(max(0, int(bootstrap_iters))):
         sample = sorted(
             [items[rng.randrange(len(items))] for _ in items],
             key=lambda row: -_num(row.get("ablation_priority_score")),
         )
-        metrics = {
-            "precision_at_20_percent": precision_at_fraction(sample, 0.20),
-            "recall_at_20_percent": recall_at_fraction(sample, 0.20),
-            "lift_at_20_percent_over_random": lift_at_fraction(sample, 0.20),
-            "average_precision_for_major_correction": average_precision(sample),
-        }
+        metrics = _rank_metrics(sample)
         for name, value in metrics.items():
             if value is not None:
                 values[name].append(float(value))
-    current = {
-        "precision_at_20_percent": precision_at_fraction(items, 0.20),
-        "recall_at_20_percent": recall_at_fraction(items, 0.20),
-        "lift_at_20_percent_over_random": lift_at_fraction(items, 0.20),
-        "average_precision_for_major_correction": average_precision(items),
-    }
+    current = _rank_metrics(items)
     out = {}
-    for name in BOOTSTRAP_METRICS:
+    for name in ABLATION_BOOTSTRAP_METRICS:
         samples = sorted(values[name])
         out[name] = {
             "value": current[name],
@@ -325,6 +339,98 @@ def bootstrap_ci(items: list[dict], preset_name: str, bootstrap_iters: int, rand
         if not samples:
             out[name]["warning"] = "bootstrap_metric_degenerate"
     return out
+
+
+def bootstrap_ci_report(
+    ranked_by_preset: dict[str, list[dict]],
+    bootstrap_iters: int,
+    random_seed: int,
+    baseline_preset: str = "current_full_priority",
+) -> dict:
+    preset_ci = {
+        name: bootstrap_ci(rows, name, bootstrap_iters, random_seed)
+        for name, rows in ranked_by_preset.items()
+    }
+    pairwise_delta = {}
+    baseline = ranked_by_preset.get(baseline_preset)
+    if baseline:
+        for name, rows in ranked_by_preset.items():
+            if name == baseline_preset:
+                continue
+            pairwise_delta[f"{name}_vs_{baseline_preset}"] = bootstrap_pairwise_delta_ci(
+                rows,
+                baseline,
+                name,
+                baseline_preset,
+                bootstrap_iters,
+                random_seed,
+            )
+    return {
+        "bootstrap_iters": int(bootstrap_iters),
+        "random_seed": int(random_seed),
+        "metrics": ABLATION_BOOTSTRAP_METRICS,
+        "presets": preset_ci,
+        "pairwise_delta_vs_current": pairwise_delta,
+    }
+
+
+def bootstrap_pairwise_delta_ci(
+    left_rows: list[dict],
+    right_rows: list[dict],
+    left_name: str,
+    right_name: str,
+    bootstrap_iters: int,
+    random_seed: int,
+) -> dict:
+    left_by_id = {_row_key(row, idx): row for idx, row in enumerate(left_rows)}
+    right_by_id = {_row_key(row, idx): row for idx, row in enumerate(right_rows)}
+    keys = [key for key in left_by_id if key in right_by_id]
+    if not keys or len({_is_major(left_by_id[key]) for key in keys}) < 2:
+        return {name: {"value": None, "ci95_low": None, "ci95_high": None, "warning": "degenerate_labels"} for name in ABLATION_BOOTSTRAP_METRICS}
+    current_left = _rank_metrics(sorted([left_by_id[key] for key in keys], key=lambda row: -_num(row.get("ablation_priority_score"))))
+    current_right = _rank_metrics(sorted([right_by_id[key] for key in keys], key=lambda row: -_num(row.get("ablation_priority_score"))))
+    rng = random.Random(random_seed + sum(ord(ch) for ch in left_name + right_name))
+    values = {name: [] for name in ABLATION_BOOTSTRAP_METRICS}
+    for _ in range(max(0, int(bootstrap_iters))):
+        sampled_keys = [keys[rng.randrange(len(keys))] for _ in keys]
+        left_sample = sorted([left_by_id[key] for key in sampled_keys], key=lambda row: -_num(row.get("ablation_priority_score")))
+        right_sample = sorted([right_by_id[key] for key in sampled_keys], key=lambda row: -_num(row.get("ablation_priority_score")))
+        left_metrics = _rank_metrics(left_sample)
+        right_metrics = _rank_metrics(right_sample)
+        for metric in ABLATION_BOOTSTRAP_METRICS:
+            if left_metrics.get(metric) is not None and right_metrics.get(metric) is not None:
+                values[metric].append(float(left_metrics[metric]) - float(right_metrics[metric]))
+    out = {}
+    for metric in ABLATION_BOOTSTRAP_METRICS:
+        samples = sorted(values[metric])
+        value = (
+            float(current_left[metric]) - float(current_right[metric])
+            if current_left.get(metric) is not None and current_right.get(metric) is not None
+            else None
+        )
+        out[metric] = {
+            "value": value,
+            "ci95_low": _percentile(samples, 2.5) if samples else None,
+            "ci95_high": _percentile(samples, 97.5) if samples else None,
+        }
+        if not samples:
+            out[metric]["warning"] = "bootstrap_metric_degenerate"
+    return out
+
+
+def _rank_metrics(items: list[dict]) -> dict:
+    binary = _binary_metrics(
+        [1 if _is_major(item) else 0 for item in items],
+        [_num(item.get("ablation_priority_score", item.get("priority_score"))) for item in items],
+    )
+    return {
+        "precision_at_20_percent": precision_at_fraction(items, 0.20),
+        "recall_at_20_percent": recall_at_fraction(items, 0.20),
+        "lift_at_20_percent_over_random": lift_at_fraction(items, 0.20),
+        "average_precision_for_major_correction": average_precision(items),
+        "roc_auc_for_major_correction": binary.get("roc_auc"),
+        "brier_score_for_major_correction": binary.get("brier_score"),
+    }
 
 
 def pairwise_comparisons(results: dict) -> dict:
@@ -496,6 +602,38 @@ def render_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
+def render_bootstrap_markdown(report: dict) -> str:
+    lines = [
+        "# Bootstrap Confidence Intervals",
+        "",
+        f"- bootstrap_iters: {report.get('bootstrap_iters')}",
+        f"- random_seed: {report.get('random_seed')}",
+        "",
+        "## Presets",
+        "| preset | metric | value | ci95 low | ci95 high |",
+        "| --- | --- | ---: | ---: | ---: |",
+    ]
+    for preset, metrics in (report.get("presets") or {}).items():
+        for metric, row in (metrics or {}).items():
+            lines.append(
+                f"| {preset} | {metric} | {_fmt(row.get('value'))} | {_fmt(row.get('ci95_low'))} | {_fmt(row.get('ci95_high'))} |"
+            )
+    lines.extend(
+        [
+            "",
+            "## Pairwise Delta Vs Current",
+            "| comparison | metric | delta | ci95 low | ci95 high |",
+            "| --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for comparison, metrics in (report.get("pairwise_delta_vs_current") or {}).items():
+        for metric, row in (metrics or {}).items():
+            lines.append(
+                f"| {comparison} | {metric} | {_fmt(row.get('value'))} | {_fmt(row.get('ci95_low'))} | {_fmt(row.get('ci95_high'))} |"
+            )
+    return "\n".join(lines)
+
+
 def _leaderboard(results: dict, metric: str) -> list[dict]:
     return [
         {"preset": name, metric: row.get(metric)}
@@ -560,6 +698,10 @@ def _top_fraction(items: list[dict], fraction: float) -> list[dict]:
 
 def _top_ids(items: list[dict], fraction: float) -> set[str]:
     return {str(item.get("task_id") or item.get("sample_id") or item.get("prediction_id")) for item in _top_fraction(items, fraction)}
+
+
+def _row_key(row: dict, fallback: int) -> str:
+    return str(row.get("task_id") or row.get("sample_id") or row.get("prediction_id") or fallback)
 
 
 def _safe_div(numerator: int | float, denominator: int | float) -> float | None:
@@ -635,6 +777,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--presets-file")
     parser.add_argument("--bootstrap-iters", type=int, default=0)
+    parser.add_argument("--bootstrap", type=int, dest="bootstrap", default=None)
     parser.add_argument("--random-seed", type=int, default=42)
     return parser
 
@@ -645,7 +788,7 @@ def main(argv: list[str] | None = None) -> int:
         args.review_queue,
         args.output_dir,
         presets_file=args.presets_file,
-        bootstrap_iters=args.bootstrap_iters,
+        bootstrap_iters=args.bootstrap if args.bootstrap is not None else args.bootstrap_iters,
         random_seed=args.random_seed,
     )
     print(

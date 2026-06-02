@@ -38,6 +38,7 @@ def learn_boundary_shape_fusion(
     output_dir: str,
     n_splits: int = 5,
     random_seed: int = 42,
+    bootstrap_iters: int = 0,
 ) -> dict:
     items = _read_jsonl(review_queue)
     labels = [target_label(item) for item in items]
@@ -90,6 +91,11 @@ def learn_boundary_shape_fusion(
             "oof": name.startswith("learned_"),
             **_metrics(y.tolist(), scores),
         }
+    ci_report = None
+    if bootstrap_iters:
+        ci_report = bootstrap_ci_report(y.tolist(), {**baseline_scores, **predictions_by_experiment}, int(bootstrap_iters), int(random_seed))
+        for name, row in experiments_report.items():
+            row["bootstrap_ci"] = (ci_report.get("experiments") or {}).get(name)
     ranked_rows = []
     for idx, item in enumerate(items):
         row = {"task_id": item.get("task_id"), "sample_id": item.get("sample_id"), "label": int(y[idx])}
@@ -102,15 +108,23 @@ def learn_boundary_shape_fusion(
         "positive_count": positives,
         "n_splits": usable_splits,
         "random_seed": int(random_seed),
+        "bootstrap_iters": int(bootstrap_iters),
         "model_type": model_type,
         "feature_sets": experiments,
         "fold_metrics": fold_rows,
         "experiments": experiments_report,
+        "bootstrap_ci": ci_report,
         "warnings": ["sklearn_unavailable_used_numpy_fallback"] if model_type.startswith("numpy") else [],
     }
     _write_json(output / "learned_boundary_shape_fusion.json", report)
+    _write_json(output / "learned_fusion_results.json", report)
     _write_jsonl(output / "learned_boundary_shape_oof_predictions.jsonl", ranked_rows)
+    _write_jsonl(output / "learned_fusion_oof_predictions.jsonl", ranked_rows)
+    if ci_report is not None:
+        _write_json(output / "learned_fusion_bootstrap_ci.json", ci_report)
+        (output / "learned_fusion_bootstrap_ci.md").write_text(render_bootstrap_markdown(ci_report), encoding="utf-8")
     (output / "learned_boundary_shape_fusion.md").write_text(render_markdown(report), encoding="utf-8")
+    (output / "learned_fusion_results.md").write_text(render_markdown(report), encoding="utf-8")
     return report
 
 
@@ -203,6 +217,105 @@ def _metrics(labels: list[int], scores: list[float]) -> dict:
     }
 
 
+def bootstrap_ci_report(labels: list[int], scores_by_experiment: dict[str, list[float]], bootstrap_iters: int, random_seed: int) -> dict:
+    metrics = ["average_precision", "roc_auc", "brier", "lift_at_20", "precision_at_20"]
+    if len(set(labels)) < 2:
+        empty = {metric: {"value": None, "ci95_low": None, "ci95_high": None, "warning": "degenerate_labels"} for metric in metrics}
+        return {
+            "bootstrap_iters": int(bootstrap_iters),
+            "random_seed": int(random_seed),
+            "metrics": metrics,
+            "experiments": {name: empty for name in scores_by_experiment},
+            "pairwise_delta_vs_current": {},
+        }
+    experiments = {
+        name: _bootstrap_metric_ci(labels, scores, name, bootstrap_iters, random_seed)
+        for name, scores in scores_by_experiment.items()
+    }
+    pairwise = {}
+    current = scores_by_experiment.get("current_full_priority")
+    if current is not None:
+        for name, scores in scores_by_experiment.items():
+            if name == "current_full_priority":
+                continue
+            pairwise[f"{name}_vs_current_full_priority"] = _bootstrap_delta_ci(
+                labels,
+                scores,
+                current,
+                name,
+                bootstrap_iters,
+                random_seed,
+                metrics,
+            )
+    return {
+        "bootstrap_iters": int(bootstrap_iters),
+        "random_seed": int(random_seed),
+        "metrics": metrics,
+        "experiments": experiments,
+        "pairwise_delta_vs_current": pairwise,
+    }
+
+
+def _bootstrap_metric_ci(labels: list[int], scores: list[float], name: str, bootstrap_iters: int, random_seed: int) -> dict:
+    metric_names = ["average_precision", "roc_auc", "brier", "lift_at_20", "precision_at_20"]
+    rng = random.Random(random_seed + sum(ord(ch) for ch in name))
+    values = {metric: [] for metric in metric_names}
+    for _ in range(max(0, int(bootstrap_iters))):
+        idxs = [rng.randrange(len(labels)) for _ in labels]
+        row = _metrics([labels[idx] for idx in idxs], [scores[idx] for idx in idxs])
+        for metric in metric_names:
+            if row.get(metric) is not None:
+                values[metric].append(float(row[metric]))
+    current = _metrics(labels, scores)
+    return {
+        metric: {
+            "value": current.get(metric),
+            "ci95_low": _percentile(sorted(values[metric]), 2.5) if values[metric] else None,
+            "ci95_high": _percentile(sorted(values[metric]), 97.5) if values[metric] else None,
+        }
+        for metric in metric_names
+    }
+
+
+def _bootstrap_delta_ci(
+    labels: list[int],
+    left_scores: list[float],
+    right_scores: list[float],
+    name: str,
+    bootstrap_iters: int,
+    random_seed: int,
+    metric_names: list[str],
+) -> dict:
+    rng = random.Random(random_seed + sum(ord(ch) for ch in name + "_delta"))
+    values = {metric: [] for metric in metric_names}
+    for _ in range(max(0, int(bootstrap_iters))):
+        idxs = [rng.randrange(len(labels)) for _ in labels]
+        sampled_labels = [labels[idx] for idx in idxs]
+        left = _metrics(sampled_labels, [left_scores[idx] for idx in idxs])
+        right = _metrics(sampled_labels, [right_scores[idx] for idx in idxs])
+        for metric in metric_names:
+            if left.get(metric) is not None and right.get(metric) is not None:
+                values[metric].append(float(left[metric]) - float(right[metric]))
+    current_left = _metrics(labels, left_scores)
+    current_right = _metrics(labels, right_scores)
+    out = {}
+    for metric in metric_names:
+        samples = sorted(values[metric])
+        value = (
+            float(current_left[metric]) - float(current_right[metric])
+            if current_left.get(metric) is not None and current_right.get(metric) is not None
+            else None
+        )
+        out[metric] = {
+            "value": value,
+            "ci95_low": _percentile(samples, 2.5) if samples else None,
+            "ci95_high": _percentile(samples, 97.5) if samples else None,
+        }
+        if not samples:
+            out[metric]["warning"] = "bootstrap_metric_degenerate"
+    return out
+
+
 def render_markdown(report: dict) -> str:
     lines = [
         "# OOF Learned Boundary/Shape Fusion",
@@ -221,6 +334,38 @@ def render_markdown(report: dict) -> str:
             f"| {name} | {row.get('oof')} | {_fmt(row.get('average_precision'))} | {_fmt(row.get('roc_auc'))} | "
             f"{_fmt(row.get('brier'))} | {_fmt(row.get('lift_at_20'))} | {_fmt(row.get('precision_at_20'))} |"
         )
+    return "\n".join(lines)
+
+
+def render_bootstrap_markdown(report: dict) -> str:
+    lines = [
+        "# Learned Fusion Bootstrap Confidence Intervals",
+        "",
+        f"- bootstrap_iters: {report.get('bootstrap_iters')}",
+        f"- random_seed: {report.get('random_seed')}",
+        "",
+        "## Experiments",
+        "| experiment | metric | value | ci95 low | ci95 high |",
+        "| --- | --- | ---: | ---: | ---: |",
+    ]
+    for experiment, metrics in (report.get("experiments") or {}).items():
+        for metric, row in (metrics or {}).items():
+            lines.append(
+                f"| {experiment} | {metric} | {_fmt(row.get('value'))} | {_fmt(row.get('ci95_low'))} | {_fmt(row.get('ci95_high'))} |"
+            )
+    lines.extend(
+        [
+            "",
+            "## Pairwise Delta Vs Current",
+            "| comparison | metric | delta | ci95 low | ci95 high |",
+            "| --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for comparison, metrics in (report.get("pairwise_delta_vs_current") or {}).items():
+        for metric, row in (metrics or {}).items():
+            lines.append(
+                f"| {comparison} | {metric} | {_fmt(row.get('value'))} | {_fmt(row.get('ci95_low'))} | {_fmt(row.get('ci95_high'))} |"
+            )
     return "\n".join(lines)
 
 
@@ -277,6 +422,12 @@ def _row_id(row: dict, fallback: int) -> str:
     return str(row.get("task_id") or row.get("sample_id") or row.get("prediction_id") or fallback)
 
 
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    return float(np.percentile(values, percentile))
+
+
 def _read_jsonl(path: str) -> list[dict]:
     with Path(path).open("r", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
@@ -314,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--random-seed", type=int, default=42)
+    parser.add_argument("--bootstrap", type=int, default=0)
     return parser
 
 
@@ -324,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output_dir,
         n_splits=args.n_splits,
         random_seed=args.random_seed,
+        bootstrap_iters=args.bootstrap,
     )
     print(f"[OK] learned boundary fusion samples={result['n_samples']} folds={result['n_splits']} output_dir={args.output_dir}")
     return 0

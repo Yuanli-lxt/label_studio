@@ -81,6 +81,11 @@ def test_cod10k_config_exists():
 
 def test_camo_config_exists():
     assert Path("configs/benchmark_v0_1.camo300.yaml").exists()
+    assert Path("configs/benchmark_v0_1.camo.yaml").exists()
+
+
+def test_cod10k_alias_config_exists():
+    assert Path("configs/benchmark_v0_1.cod10k.yaml").exists()
 
 
 def test_cod10k_default_difficulty_tags(tmp_path):
@@ -106,3 +111,29 @@ def test_camo_default_difficulty_tags(tmp_path):
         )
     )
     assert "camouflaged_object" in row["difficulty_tags"]
+
+
+def test_mask_folder_loader_supports_recursive_globs_and_mask_suffix(tmp_path):
+    images = tmp_path / "images" / "nested"
+    masks = tmp_path / "masks" / "nested"
+    images.mkdir(parents=True)
+    masks.mkdir(parents=True)
+    Image.new("RGB", (10, 10), "white").save(images / "sample.jpg")
+    mask = Image.new("L", (10, 10), 0)
+    for x in range(1, 4):
+        for y in range(1, 4):
+            mask.putpixel((x, y), 255)
+    mask.save(masks / "sample_mask.png")
+    rows = list(
+        iter_mask_folder_manifest_samples(
+            tmp_path / "images",
+            tmp_path / "masks",
+            "bench",
+            "cod10k",
+            image_glob="**/*.jpg,**/*.png",
+            mask_glob="**/*.png",
+            mask_match_strategy="same_stem_strip_suffix",
+        )
+    )
+    assert len(rows) == 1
+    assert rows[0]["image_id"] == "sample"

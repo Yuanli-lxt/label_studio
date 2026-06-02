@@ -110,6 +110,8 @@ class SegmentationReviewQueueTests(unittest.TestCase):
         self.assertIn("boundary_shape_score", item["score_components"])
         self.assertIsInstance(item["review_reasons"], list)
         self.assertIn("high_correction_risk", item["review_reasons"])
+        self.assertIn("prediction_features", item)
+        self.assertIn("mask_quality", item)
         self.assertIn("source_metadata", item)
 
     def test_missing_uncertainty_is_deterministic(self):

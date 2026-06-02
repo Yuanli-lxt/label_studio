@@ -14,7 +14,7 @@ COCO_ANNOTATIONS_URL = "http://images.cocodataset.org/annotations/annotations_tr
 LVIS_VAL_ANNOTATIONS_URL = "https://dl.fbaipublicfiles.com/LVIS/lvis_v1_val.json.zip"
 
 
-def download_coco_val2017(output_dir: str, force: bool = False) -> dict:
+def download_coco_val2017(output_dir: str, force: bool = False, skip_existing: bool = True) -> dict:
     root = Path(output_dir) / "coco"
     images_dir = root / "val2017"
     annotations_dir = root / "annotations"
@@ -24,12 +24,12 @@ def download_coco_val2017(output_dir: str, force: bool = False) -> dict:
 
     images_zip = root / "val2017.zip"
     annotations_zip = root / "annotations_trainval2017.zip"
-    if force or not images_dir.exists():
+    if force or not (skip_existing and images_dir.exists()):
         _download(COCO_VAL_IMAGES_URL, images_zip, force=force)
         _extract_zip(images_zip, root, force=force)
     else:
         print(f"[SKIP] images already exist: {images_dir}")
-    if force or not instances_file.exists():
+    if force or not (skip_existing and instances_file.exists()):
         _download(COCO_ANNOTATIONS_URL, annotations_zip, force=force)
         _extract_instances_file(annotations_zip, annotations_dir, force=force)
     else:
@@ -37,7 +37,7 @@ def download_coco_val2017(output_dir: str, force: bool = False) -> dict:
     return {"images_dir": str(images_dir), "annotations_file": str(instances_file)}
 
 
-def download_lvis_val(output_dir: str, force: bool = False, dry_run: bool = False) -> dict:
+def download_lvis_val(output_dir: str, force: bool = False, dry_run: bool = False, skip_existing: bool = True) -> dict:
     root = Path(output_dir) / "lvis"
     annotations_dir = root / "annotations"
     target = annotations_dir / "lvis_v1_val.json"
@@ -51,7 +51,7 @@ def download_lvis_val(output_dir: str, force: bool = False, dry_run: bool = Fals
         return {"annotations_file": str(target), "images_dir": str(Path(output_dir) / "coco" / "val2017")}
     root.mkdir(parents=True, exist_ok=True)
     annotations_dir.mkdir(parents=True, exist_ok=True)
-    if force or not target.exists():
+    if force or not (skip_existing and target.exists()):
         _download(LVIS_VAL_ANNOTATIONS_URL, zip_path, force=force)
         _extract_lvis_file(zip_path, annotations_dir, force=force)
     else:
@@ -60,34 +60,64 @@ def download_lvis_val(output_dir: str, force: bool = False, dry_run: bool = Fals
     return {"annotations_file": str(target), "images_dir": str(Path(output_dir) / "coco" / "val2017")}
 
 
-def manual_dataset_message(dataset: str, output_dir: str) -> str:
+def manual_dataset_message(
+    dataset: str,
+    output_dir: str,
+    skip_existing: bool = True,
+    target_root_is_dataset_root: bool = False,
+) -> str:
     entry = get_dataset_entry(dataset)
-    root = Path(output_dir) / dataset
+    root = Path(output_dir) if target_root_is_dataset_root else Path(output_dir) / dataset
+    images_dir = root / "images"
+    masks_dir = root / "masks"
+    image_count = _quick_file_count(images_dir)
+    mask_count = _quick_file_count(masks_dir)
     lines = [
         f"[MANUAL] {entry.display_name} requires manual download or an external archive.",
         f"[PURPOSE] {entry.display_name} is used as a foreground/boundary stress dataset, not long-tail category validation.",
+        f"[SOURCE] {entry.official_page_note}",
+        "[MIRROR] official/manual project links only; no scripted mirror is configured.",
+        f"[ARCHIVE] expected_archive_name={dataset}.zip or official dataset archive name",
+        "[SIZE] expected_size=unknown",
         f"[LICENSE] {entry.license_note}",
         "[DOWNLOAD] Use the official dataset page or project release links; this CLI intentionally does not hard-code Google Drive/Baidu URLs.",
+        f"[TARGET] target_root={root}",
+        f"[SKIP_EXISTING] {str(bool(skip_existing)).lower()}",
+    ]
+    if skip_existing and (images_dir.exists() or masks_dir.exists()):
+        lines.append(f"[SKIP] existing manual dataset directories detected under {root}; no files will be overwritten.")
+    lines.extend([
         "[LAYOUT] expected directory layout:",
         f"  {root}/",
         f"    images/",
         f"    masks/",
         f"[CONFIG] configs/benchmark_v0_1.{dataset}300.yaml",
+        f"[CONFIG] configs/benchmark_v0_1.{dataset}.yaml",
         f"[CONFIG] images_dir={root / 'images'}",
         f"[CONFIG] masks_dir={root / 'masks'}",
-    ]
-    for local_dir in entry.expected_local_dirs:
-        parts = Path(local_dir).parts
-        suffix = Path(*parts[2:]) if len(parts) > 2 else Path(dataset)
-        lines.append(f"  {Path(output_dir) / suffix}")
+        "[POST-PREPARE] downloaded_archive_path=manual",
+        f"[POST-PREPARE] extracted_root={root}",
+        f"[POST-PREPARE] image_directory_candidates={[str(images_dir)]}",
+        f"[POST-PREPARE] mask_directory_candidates={[str(masks_dir)]}",
+        f"[POST-PREPARE] quick_image_count={image_count if image_count is not None else 'unavailable'}",
+        f"[POST-PREPARE] quick_mask_count={mask_count if mask_count is not None else 'unavailable'}",
+    ])
     lines.extend(
         [
             "[NEXT] after placement, run:",
             f"  python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.{dataset}300.yaml",
+            f"  python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.{dataset}.yaml",
             f"[INFO] no files were written under {root}",
         ]
     )
     return "\n".join(lines)
+
+
+def _quick_file_count(root: Path) -> int | None:
+    if not root.exists():
+        return None
+    suffixes = {".jpg", ".jpeg", ".png", ".bmp"}
+    return sum(1 for path in root.rglob("*") if path.is_file() and path.suffix.lower() in suffixes)
 
 
 def download_open_images_subset(
@@ -194,10 +224,12 @@ def _extract_lvis_file(path: Path, annotations_dir: Path, force: bool = False) -
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Explicitly download public benchmark data.")
     parser.add_argument("--dataset", required=True, choices=sorted(DATASET_REGISTRY))
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--output-dir")
+    parser.add_argument("--target-root")
     parser.add_argument("--split", default="validation")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--skip-existing", action="store_true", default=True)
     parser.add_argument("--use-fiftyone", default="false")
     parser.add_argument("--allow-manual-placeholder", default="false")
     parser.add_argument("--dry-run", action="store_true")
@@ -206,8 +238,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    output_dir = args.target_root or args.output_dir
+    if not output_dir:
+        print("[ERROR] one of --output-dir or --target-root is required")
+        return 1
     use_fiftyone = str(args.use_fiftyone).lower() in {"1", "true", "yes"}
     allow_manual = str(args.allow_manual_placeholder).lower() in {"1", "true", "yes"}
+    skip_existing = bool(args.skip_existing) and not bool(args.force)
     entry = get_dataset_entry(args.dataset)
     print(f"[INFO] dataset={entry.dataset_name} mode={entry.download_mode}")
     print(f"[LICENSE] {entry.license_note}")
@@ -216,23 +253,30 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run:
                 print("[DRY-RUN] would download COCO val2017 images and annotations")
                 return 0
-            summary = download_coco_val2017(args.output_dir, force=args.force)
+            summary = download_coco_val2017(output_dir, force=args.force, skip_existing=skip_existing)
             print("[OK] COCO val2017 data ready")
             print(f"images_dir={summary['images_dir']}")
             print(f"annotations_file={summary['annotations_file']}")
             return 0
         if args.dataset == "lvis_val":
-            summary = download_lvis_val(args.output_dir, force=args.force, dry_run=args.dry_run)
+            summary = download_lvis_val(output_dir, force=args.force, dry_run=args.dry_run, skip_existing=skip_existing)
             print("[OK] LVIS val annotations ready" if not args.dry_run else "[OK] LVIS dry run complete")
             print(f"images_dir={summary['images_dir']}")
             print(f"annotations_file={summary['annotations_file']}")
             return 0
         if args.dataset in {"dis5k", "cod10k", "camo"}:
-            print(manual_dataset_message(args.dataset, args.output_dir))
+            print(
+                manual_dataset_message(
+                    args.dataset,
+                    output_dir,
+                    skip_existing=skip_existing,
+                    target_root_is_dataset_root=bool(args.target_root),
+                )
+            )
             return 0 if args.dry_run or allow_manual else 1
         if args.dataset == "open_images_v7_segmentations":
             summary = download_open_images_subset(
-                args.output_dir,
+                output_dir,
                 split=args.split,
                 max_samples=args.max_samples,
                 use_fiftyone=use_fiftyone,

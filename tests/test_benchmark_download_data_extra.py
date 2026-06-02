@@ -89,3 +89,24 @@ def test_cod10k_manual_download_message(tmp_path, capsys):
 def test_camo_manual_download_message(tmp_path, capsys):
     assert main(["--dataset", "camo", "--output-dir", str(tmp_path)]) == 1
     assert "CAMO" in capsys.readouterr().out
+
+
+def test_cod10k_dry_run_accepts_target_root_and_writes_nothing(tmp_path, capsys):
+    assert main(["--dataset", "cod10k", "--target-root", str(tmp_path), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "target_root" in out
+    assert "benchmark_v0_1.cod10k.yaml" in out
+    assert f"images_dir={tmp_path / 'images'}" in out
+    assert f"masks_dir={tmp_path / 'masks'}" in out
+    assert f"{tmp_path / 'cod10k' / 'images'}" not in out
+    assert "[SOURCE]" in out
+    assert "[ARCHIVE]" in out
+    assert list(Path(tmp_path).iterdir()) == []
+
+
+def test_camo_dry_run_accepts_target_root_and_reports_candidates(tmp_path, capsys):
+    assert main(["--dataset", "camo", "--target-root", str(tmp_path), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert f"image_directory_candidates={['%s' % (tmp_path / 'images')]}" in out
+    assert "quick_image_count=unavailable" in out
+    assert "CC-BY-NC-SA" in out

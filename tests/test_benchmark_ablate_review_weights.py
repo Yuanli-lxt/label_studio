@@ -101,6 +101,8 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
             ablate_review_weights(str(queue), str(root / "out"), bootstrap_iters=5)
             self.assertTrue((root / "out" / "weight_ablation.json").exists())
             self.assertTrue((root / "out" / "weight_ablation.md").exists())
+            self.assertTrue((root / "out" / "ablation_results.json").exists())
+            self.assertTrue((root / "out" / "bootstrap_ci.json").exists())
 
     def test_ablate_review_weights_preserves_original_priority(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,8 +254,10 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
             root = Path(tmp)
             rows = [item(i, i in {2, 4, 6, 8}, priority=i / 12) for i in range(1, 13)]
             queue = write_queue(root, rows)
-            result = learn_boundary_shape_fusion(str(queue), str(root / "learned"), n_splits=3)
+            result = learn_boundary_shape_fusion(str(queue), str(root / "learned"), n_splits=3, bootstrap_iters=5)
             self.assertTrue((root / "learned" / "learned_boundary_shape_fusion.json").exists())
+            self.assertTrue((root / "learned" / "learned_fusion_results.json").exists())
+            self.assertTrue((root / "learned" / "learned_fusion_bootstrap_ci.json").exists())
             self.assertIn("learned_boundary_shape_only", result["experiments"])
             self.assertTrue(result["experiments"]["learned_boundary_shape_only"]["oof"])
             feature_text = "\n".join(result["feature_sets"]["learned_current_plus_boundary_shape"])
@@ -266,6 +270,8 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
             queue = write_queue(root, self.rows())
             result = ablate_review_weights(str(queue), str(root / "out"), bootstrap_iters=5)
             self.assertIn("bootstrap_ci", result["presets"]["risk_heavy"])
+            self.assertIn("pairwise_delta_vs_current", result["bootstrap_ci"])
+            self.assertIn("roc_auc_for_major_correction", result["bootstrap_ci"]["metrics"])
 
     def test_ablation_bootstrap_reproducible(self):
         with tempfile.TemporaryDirectory() as tmp:
