@@ -41,6 +41,38 @@ def write_manifest(root: Path, bbox=None) -> Path:
     return manifest
 
 
+def write_dis5k_manifest(root: Path) -> Path:
+    image_path = root / "tiny.jpg"
+    mask_path = root / "tiny.png"
+    Image.new("RGB", (20, 20), "white").save(image_path)
+    mask = np.zeros((20, 20), dtype=np.uint8)
+    mask[5:13, 5:13] = 255
+    Image.fromarray(mask).save(mask_path)
+    row = {
+        "benchmark_id": "benchmark_v0_1_dis5k300",
+        "dataset": "DIS5K",
+        "sample_id": "DIS5K_tiny",
+        "image_id": "tiny",
+        "annotation_id": "tiny",
+        "image_path": str(image_path),
+        "mask_path": str(mask_path),
+        "width": 20,
+        "height": 20,
+        "category_id": "foreground_object",
+        "category_name": "foreground_object",
+        "gt_bbox_xyxy": [5.0, 5.0, 13.0, 13.0],
+        "gt_area": 64,
+        "gt_area_ratio": 64 / 400,
+        "gt_touches_border": False,
+        "difficulty_tags": ["medium_object", "thin_structure"],
+        "boundary_metadata": {"perimeter_px": 28.0},
+        "split": "benchmark_v0_1_dis5k300",
+    }
+    manifest = root / "manifest_dis5k.jsonl"
+    manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return manifest
+
+
 class FakeMobileSamApp:
     def __init__(self, fallback=False, shape=(20, 20)):
         self.fallback = fallback
@@ -205,6 +237,44 @@ class BenchmarkRunSafetyTests(unittest.TestCase):
             row = json.loads((root / "out" / "predictions.jsonl").read_text(encoding="utf-8").splitlines()[0])
             self.assertIsNotNone(row["mask_quality"]["prompt_bbox"])
             self.assertIsNotNone(row["mask_quality"]["bbox_iou_prompt_mask"])
+
+    def test_dis5k_benchmark_outputs_boundary_metrics_with_mock_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = write_dis5k_manifest(root)
+            out = root / "out"
+            run_benchmark(str(manifest), str(out), backend="bbox_rect")
+            for name in [
+                "predictions.jsonl",
+                "correction_delta_dataset.jsonl",
+                "review_queue.jsonl",
+                "evaluation_report.json",
+                "evaluation_report.md",
+                "runtime_metadata.json",
+            ]:
+                self.assertTrue((out / name).exists())
+            delta = json.loads((out / "correction_delta_dataset.jsonl").read_text(encoding="utf-8").splitlines()[0])["delta"]
+            self.assertIn("boundary", delta)
+            report = json.loads((out / "evaluation_report.json").read_text(encoding="utf-8"))
+            self.assertIn("boundary_quality", report)
+            self.assertIn("Boundary Quality", (out / "evaluation_report.md").read_text(encoding="utf-8"))
+
+    def test_run_benchmark_writes_prediction_time_shape_features(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = write_manifest(root)
+            out = root / "out"
+            run_benchmark(str(manifest), str(out), backend="bbox_rect")
+            pred = json.loads((out / "predictions.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            delta = json.loads((out / "correction_delta_dataset.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            queue = json.loads((out / "review_queue.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            for row in [pred, delta]:
+                features = row["prediction_features"]
+                self.assertIn("pred_boundary_complexity", features)
+                self.assertIn("pred_component_count", features)
+                self.assertIn("pred_thinness_proxy", features)
+            self.assertIn("boundary_shape_score", queue["score_components"])
+            self.assertIn("prediction_features", queue["source_metadata"])
 
     def test_uncertainty_metadata_written(self):
         with tempfile.TemporaryDirectory() as tmp:

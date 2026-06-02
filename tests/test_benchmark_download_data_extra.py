@@ -45,6 +45,16 @@ def test_download_data_manual_dataset_explains_required_layout(tmp_path, capsys)
     assert "masks" in out
 
 
+def test_dis5k_download_dry_run_manual_instructions(tmp_path, capsys):
+    assert main(["--dataset", "dis5k", "--output-dir", str(tmp_path), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "foreground/boundary stress" in out
+    assert "configs/benchmark_v0_1.dis5k300.yaml" in out
+    assert "images_dir" in out
+    assert "masks_dir" in out
+    assert list(Path(tmp_path).iterdir()) == []
+
+
 def test_download_data_open_images_requires_fiftyone_when_enabled(tmp_path, capsys):
     assert (
         main(

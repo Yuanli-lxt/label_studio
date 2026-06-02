@@ -7,6 +7,7 @@ risk_only:
   uncertainty_score: 0.0
   rule_review_score: 0.0
   geometry_complexity_score: 0.0
+  boundary_shape_score: 0.0
   diversity_score: 0.0
 
 risk_heavy:
@@ -14,6 +15,7 @@ risk_heavy:
   uncertainty_score: 0.10
   rule_review_score: 0.10
   geometry_complexity_score: 0.10
+  boundary_shape_score: 0.0
   diversity_score: 0.05
 
 risk_dominant:
@@ -21,6 +23,7 @@ risk_dominant:
   uncertainty_score: 0.05
   rule_review_score: 0.05
   geometry_complexity_score: 0.05
+  boundary_shape_score: 0.0
   diversity_score: 0.05
 
 uncertainty_heavy:
@@ -28,6 +31,7 @@ uncertainty_heavy:
   uncertainty_score: 0.35
   rule_review_score: 0.10
   geometry_complexity_score: 0.10
+  boundary_shape_score: 0.0
   diversity_score: 0.10
 
 quality_heavy:
@@ -35,6 +39,7 @@ quality_heavy:
   uncertainty_score: 0.10
   rule_review_score: 0.30
   geometry_complexity_score: 0.15
+  boundary_shape_score: 0.0
   diversity_score: 0.10
 
 no_diversity:
@@ -42,6 +47,7 @@ no_diversity:
   uncertainty_score: 0.15
   rule_review_score: 0.15
   geometry_complexity_score: 0.15
+  boundary_shape_score: 0.0
   diversity_score: 0.0
 
 balanced_no_risk:
@@ -49,4 +55,14 @@ balanced_no_risk:
   uncertainty_score: 0.25
   rule_review_score: 0.30
   geometry_complexity_score: 0.25
+  boundary_shape_score: 0.0
   diversity_score: 0.20
+
+boundary_shape_experimental:
+  description: Experimental prediction-time boundary/shape fusion; does not use GT boundary metadata or delta metrics.
+  correction_risk_score: 0.25
+  uncertainty_score: 0.10
+  rule_review_score: 0.20
+  geometry_complexity_score: 0.15
+  boundary_shape_score: 0.20
+  diversity_score: 0.10

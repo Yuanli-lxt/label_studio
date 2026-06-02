@@ -920,6 +920,176 @@ python -m image_segmentation.benchmark.ablate_review_weights \
 
 Experimental presets live in `configs/review_weight_presets.yaml`. The review queue can load a preset with `IMAGE_SEG_REVIEW_WEIGHT_PRESET` and `IMAGE_SEG_REVIEW_WEIGHT_PRESETS_FILE`, but do not replace the default before validating on a second dataset or another run. COCO is broad but may not reflect harder segmentation datasets such as LVIS, DIS5K, or COD10K.
 
+## DIS5K300 Boundary-Stress Validation
+
+### Purpose
+
+DIS5K300 is a foreground segmentation and high-detail boundary stress test. It is not long-tail category validation. It tests fine-grained boundary quality, `correction_area_ratio`, thin structures, high boundary complexity, and cases where the bbox prompt is correct but the mask boundary still needs correction.
+
+DIS5K is a manual dataset. The CLI prints placement instructions but does not download large files or hard-code unstable Google Drive/Baidu links:
+
+```bash
+python -m image_segmentation.benchmark.download_data \
+  --dataset dis5k \
+  --output-dir data/external \
+  --dry-run
+```
+
+### Dataset Layout
+
+Expected local layout:
+
+```text
+data/external/dis5k/
+  images/
+  masks/
+```
+
+Images and masks are paired by filename stem. Masks should be binary masks, or convertible to binary with `foreground > 0`. Image and mask sizes must match by default. The benchmark does not automatically download DIS5K and does not resize GT masks unless a config explicitly allows that behavior.
+
+### Preflight
+
+```bash
+python -m image_segmentation.benchmark.preflight \
+  --config configs/benchmark_v0_1.dis5k300.yaml \
+  --json-output demo_data/model_state/image_segmentation/benchmark/dis5k300_preflight.json
+```
+
+Preflight checks `images_dir`, `masks_dir`, pairing count, missing image/mask counts, empty masks, image/mask size mismatch, valid bbox/area, and `sample_check`.
+
+### Build Manifest
+
+```bash
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.dis5k300.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest.jsonl \
+  --summary-output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest_summary.json
+```
+
+The manifest includes `mask_path`, `category_name=foreground_object`, `gt_bbox_xyxy`, `difficulty_tags`, and `boundary_metadata`. `boundary_metadata` is GT-derived; it is for diagnostics and evaluation breakdown only. It must not be used for production priority scoring or risk features unless equivalent prediction-time features are implemented.
+
+### Run MobileSAM GPU Benchmark
+
+```bash
+export IMAGE_SEG_BACKEND=mobilesam
+export IMAGE_SEG_CHECKPOINT=/home/yuanli/projects/label-platform/models/mobilesam/mobile_sam.pt
+export IMAGE_SEG_DEVICE=cuda
+export CUDA_VISIBLE_DEVICES=0
+
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu \
+  --backend mobile_sam \
+  --enable-prompt-stability false \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk \
+  --resume true
+```
+
+Keep prompt-stability disabled for the full DIS5K300 run. Use GPU, and do not allow fallback. Outputs include `predictions.jsonl`, `correction_delta_dataset.jsonl`, `review_queue.jsonl`, `evaluation_report.json`, `evaluation_report.md`, and `runtime_metadata.json`.
+
+### Boundary Metrics
+
+Boundary metrics are written as evaluation deltas:
+
+- boundary IoU: overlap between tolerated model and human boundary bands.
+- boundary F1: harmonic mean of boundary precision and recall.
+- boundary precision: fraction of model boundary matched by the GT boundary band.
+- boundary recall: fraction of GT boundary matched by the model boundary band.
+- boundary error area ratio: symmetric mask difference area divided by image area.
+
+High IoU but low boundary F1 means the region is roughly correct but the boundary is poor. High `high_boundary_complexity` or `thin_structure` failure rates suggest boundary-aware prediction-time features may be needed.
+
+### Prediction-Time Boundary/Shape Features
+
+The benchmark also records prediction-time boundary/shape features derived only from the predicted mask and image size: `pred_area_ratio`, `pred_bbox_area_ratio`, `pred_extent`, `pred_aspect_ratio`, `pred_touches_border`, `pred_boundary_complexity`, `pred_boundary_density`, `pred_component_count`, `pred_largest_component_ratio`, `pred_hole_count`, and `pred_thinness_proxy`.
+
+These features are stored in `prediction_features` and `mask_quality.prediction_time_boundary_shape`. They are safe candidates for Layer 5 priority experiments because they do not use GT masks, IoU/Dice, boundary deltas, correction labels, or human masks.
+
+### OOF Risk Evaluation
+
+```bash
+python -m image_segmentation.benchmark.crossfit_risk_evaluation \
+  --delta-dataset demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu/correction_delta_dataset.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof \
+  --n-splits 5 \
+  --random-seed 42 \
+  --bootstrap-iters 1000
+```
+
+Initial effectiveness standard:
+
+```text
+OOF lift@20 > 1.5
+OOF AP > base rate
+OOF precision@20 > random expected precision
+```
+
+### Weight Ablation
+
+```bash
+python -m image_segmentation.benchmark.ablate_review_weights \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof/oof_review_queue.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof_weight_ablation \
+  --bootstrap-iters 1000 \
+  --random-seed 42
+```
+
+Focus on `current_full_priority`, `risk_heavy`, `risk_only`, and `no_diversity`.
+
+The `boundary_shape_experimental` preset adds a nonzero `boundary_shape_score` component while leaving the default Layer 5 weights unchanged. Use it only as an experimental comparison until it is stable across datasets.
+
+### Three-Way Comparison
+
+```bash
+python -m image_segmentation.benchmark.compare_benchmark_runs \
+  --run COCO1000:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu/evaluation_report.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof/oof_summary.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof_weight_ablation/weight_ablation.json \
+  --run LVIS500:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu/evaluation_report.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof/oof_summary.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof_weight_ablation/weight_ablation.json \
+  --run DIS5K300:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu/evaluation_report.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof/oof_summary.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof_weight_ablation/weight_ablation.json \
+  --output demo_data/model_state/image_segmentation/benchmark/coco_lvis_dis5k_comparison.md
+```
+
+The three-way comparison answers which dataset is hardest, whether `risk_heavy` beats current across all runs, whether DIS5K exposes boundary failures, and whether boundary prediction-time features are needed.
+
+### Optional DIS5K500
+
+Run DIS5K500 only when DIS5K300 evidence is insufficient: `positive_count < 30`, bootstrap CI is too wide, ablation conclusions are unstable, or boundary diagnostics have too few samples.
+
+Template config:
+
+```yaml
+benchmark_id: benchmark_v0_1_dis5k500
+random_seed: 42
+max_samples_total: 500
+
+datasets:
+  dis5k:
+    enabled: true
+    images_dir: data/external/dis5k/images
+    masks_dir: data/external/dis5k/masks
+    max_samples: 500
+
+sampling:
+  strategy: stratified
+  image_diversity: true
+  include_tags:
+    - small_object
+    - touches_border
+    - elongated_object
+    - thin_structure
+    - high_boundary_complexity
+```
+
+Then run the same `build_manifest`, `run_benchmark`, `crossfit_risk_evaluation`, and `ablate_review_weights` commands with `dis5k500` output paths.
+
+### Do Not
+
+- Do not use GT-derived `boundary_metadata` for production priority scoring.
+- Do not use boundary delta metrics as risk features.
+- Do not treat `boundary_shape_experimental` as a default-weight change.
+- Do not change default Layer 5 weights based on DIS5K alone.
+- Do not run Layer 6.
+- Do not enable prompt-stability for full DIS5K300 unless explicitly doing an uncertainty sanity run.
+
 ## Tests
 
 ```bash

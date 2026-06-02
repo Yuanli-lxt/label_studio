@@ -17,6 +17,7 @@ def build_evaluation_report(queue_items: list[dict], correction_records: list[di
         _num(delta.get("model_human_precision")) for delta in deltas if delta.get("model_human_precision") is not None
     ]
     recall = [_num(delta.get("model_human_recall")) for delta in deltas if delta.get("model_human_recall") is not None]
+    boundary_rows = [delta.get("boundary") for delta in deltas if isinstance(delta.get("boundary"), dict)]
     severities = Counter(str(delta.get("correction_severity") or "unknown") for delta in deltas)
     major_count = sum(1 for delta in deltas if delta.get("major_correction") is True)
     base_rate = _safe_div(major_count, len(ok_records))
@@ -58,6 +59,7 @@ def build_evaluation_report(queue_items: list[dict], correction_records: list[di
     }
     return {
         "overall_quality": overall,
+        "boundary_quality": _boundary_quality(boundary_rows),
         "base_rate": {
             "major_correction_base_rate": base_rate,
             "random_expected_precision_at_10_percent": base_rate,
@@ -75,6 +77,7 @@ def build_evaluation_report(queue_items: list[dict], correction_records: list[di
         "top_20_percent_samples": top_fraction_details(queue_items, 0.20),
         "false_negatives": false_negative_details(queue_items, 0.20, limit=20),
         "major_correction_diagnostics": major_correction_diagnostics(ok_records, queue_items),
+        "boundary_stress_diagnostics": boundary_stress_diagnostics(ok_records, queue_items),
         "category_frequency_breakdown": category_frequency_breakdown(ok_records),
         "score_component_summary": score_component_summary(queue_items),
         "uncertainty_summary": uncertainty_summary(queue_items),
@@ -224,6 +227,46 @@ def major_correction_diagnostics(records: list[dict], queue_items: list[dict]) -
     }
 
 
+def _boundary_quality(boundaries: list[dict]) -> dict:
+    return {
+        "mean_boundary_iou": safe_mean([_num(row.get("boundary_iou")) for row in boundaries if row.get("boundary_iou") is not None]),
+        "mean_boundary_f1": safe_mean([_num(row.get("boundary_f1")) for row in boundaries if row.get("boundary_f1") is not None]),
+        "mean_boundary_precision": safe_mean([_num(row.get("boundary_precision")) for row in boundaries if row.get("boundary_precision") is not None]),
+        "mean_boundary_recall": safe_mean([_num(row.get("boundary_recall")) for row in boundaries if row.get("boundary_recall") is not None]),
+        "mean_boundary_error_area_ratio": safe_mean([_num(row.get("boundary_error_area_ratio")) for row in boundaries if row.get("boundary_error_area_ratio") is not None]),
+        "available_count": len(boundaries),
+    }
+
+
+def boundary_stress_diagnostics(records: list[dict], queue_items: list[dict]) -> dict:
+    tag_rows = {row["tag"]: row for row in _group_by_tag(records, queue_items)}
+    focused = {}
+    for tag in ["high_boundary_complexity", "thin_structure", "elongated_object", "small_object", "touches_border"]:
+        row = dict(tag_rows.get(tag) or {"tag": tag, "n_samples": 0, "major_correction_rate": None})
+        rows = [record for record in records if tag in (record.get("difficulty_tags") or [])]
+        row["mean_boundary_f1"] = safe_mean([
+            _num(((record.get("delta") or {}).get("boundary") or {}).get("boundary_f1"))
+            for record in rows
+            if (((record.get("delta") or {}).get("boundary") or {}).get("boundary_f1")) is not None
+        ])
+        focused[tag] = row
+    false_negatives = false_negative_details(queue_items, 0.20, limit=len(queue_items))
+    return {
+        "difficulty_tags": focused,
+        "mean_boundary_f1_by_difficulty_tag": {
+            tag: row.get("mean_boundary_f1") for tag, row in focused.items()
+        },
+        "top_false_negatives_by_low_boundary_f1": sorted(
+            false_negatives,
+            key=lambda row: _num(row.get("boundary_f1")),
+        )[:20],
+        "top_false_negatives_by_high_correction_area_ratio": sorted(
+            false_negatives,
+            key=lambda row: -_num(row.get("correction_area_ratio")),
+        )[:20],
+    }
+
+
 def category_frequency_breakdown(records: list[dict]) -> list[dict]:
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in records:
@@ -254,6 +297,7 @@ def score_component_summary(items: list[dict]) -> dict:
         "uncertainty_score",
         "rule_review_score",
         "geometry_complexity_score",
+        "boundary_shape_score",
         "diversity_score",
     ]
     out = {}
@@ -302,6 +346,7 @@ def render_markdown_report(report: dict) -> str:
     runtime = report.get("runtime") or {}
     warnings = report.get("metric_warnings") or []
     base = report.get("base_rate") or {}
+    boundary = report.get("boundary_quality") or {}
     lines = [
         "# Benchmark v0.1 Evaluation Report",
         "",
@@ -324,6 +369,13 @@ def render_markdown_report(report: dict) -> str:
         f"- major correction count: {overall.get('major_correction_count')}",
         f"- major correction rate: {_fmt(overall.get('major_correction_rate'))}",
         f"- correction severity distribution: {overall.get('correction_severity_distribution')}",
+        "",
+        "## Boundary Quality",
+        f"- mean boundary IoU: {_fmt(boundary.get('mean_boundary_iou'))}",
+        f"- mean boundary F1: {_fmt(boundary.get('mean_boundary_f1'))}",
+        f"- mean boundary precision: {_fmt(boundary.get('mean_boundary_precision'))}",
+        f"- mean boundary recall: {_fmt(boundary.get('mean_boundary_recall'))}",
+        f"- mean boundary error area ratio: {_fmt(boundary.get('mean_boundary_error_area_ratio'))}",
         "",
         "## Base Rate",
         f"- major correction base rate: {_fmt(base.get('major_correction_base_rate'))}",
@@ -359,6 +411,9 @@ def render_markdown_report(report: dict) -> str:
         "## Major Correction Diagnostics",
         *_diagnostic_lines(report.get("major_correction_diagnostics") or {}),
         "",
+        "## Boundary Stress Diagnostics",
+        *_boundary_stress_lines(report.get("boundary_stress_diagnostics") or {}),
+        "",
         "## Category Frequency Breakdown",
         *_frequency_lines(report.get("category_frequency_breakdown") or []),
         "",
@@ -388,6 +443,8 @@ def _sample_detail(item: dict) -> dict:
         "major_correction": delta.get("major_correction"),
         "model_human_iou": delta.get("model_human_iou"),
         "correction_area_ratio": delta.get("correction_area_ratio"),
+        "boundary_f1": (delta.get("boundary") or {}).get("boundary_f1") if isinstance(delta.get("boundary"), dict) else None,
+        "boundary_iou": (delta.get("boundary") or {}).get("boundary_iou") if isinstance(delta.get("boundary"), dict) else None,
         "correction_reason": delta.get("correction_reason"),
         "source_metadata": source,
     }
@@ -462,6 +519,24 @@ def _diagnostic_lines(diagnostics: dict) -> list[str]:
     return lines
 
 
+def _boundary_stress_lines(diagnostics: dict) -> list[str]:
+    if not diagnostics:
+        return ["- none"]
+    rows = diagnostics.get("difficulty_tags") or {}
+    lines = []
+    for tag in ["high_boundary_complexity", "thin_structure", "elongated_object", "small_object", "touches_border"]:
+        row = rows.get(tag) or {}
+        lines.append(
+            f"- {tag}: n={row.get('n_samples', 0)}, major_rate={_fmt(row.get('major_correction_rate'))}, "
+            f"mean_boundary_f1={_fmt(row.get('mean_boundary_f1'))}"
+        )
+    lines.append("- top false negatives by low boundary F1:")
+    lines.extend(_sample_lines(diagnostics.get("top_false_negatives_by_low_boundary_f1") or []))
+    lines.append("- top false negatives by high correction_area_ratio:")
+    lines.extend(_sample_lines(diagnostics.get("top_false_negatives_by_high_correction_area_ratio") or []))
+    return lines
+
+
 def _frequency_lines(rows: list[dict]) -> list[str]:
     if not rows:
         return ["- none"]
@@ -521,11 +596,17 @@ def _group_by_tag(records: list[dict], queue_items: list[dict]) -> list[dict]:
     for tag, rows in sorted(groups.items()):
         deltas = [row["delta"] for row in rows]
         ious = [_num(delta.get("model_human_iou")) for delta in deltas if delta.get("model_human_iou") is not None]
+        boundary_f1 = [
+            _num((delta.get("boundary") or {}).get("boundary_f1"))
+            for delta in deltas
+            if isinstance(delta.get("boundary"), dict) and (delta.get("boundary") or {}).get("boundary_f1") is not None
+        ]
         out.append(
             {
                 "tag": tag,
                 "n_samples": len(rows),
                 "mean_iou": safe_mean(ious),
+                "mean_boundary_f1": safe_mean(boundary_f1),
                 "major_correction_rate": _safe_div(
                     sum(1 for delta in deltas if delta.get("major_correction") is True), len(rows)
                 ),

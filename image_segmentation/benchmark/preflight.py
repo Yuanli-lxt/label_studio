@@ -62,6 +62,11 @@ def _preflight_dataset(dataset_name: str, dataset_config: dict, benchmark_id: st
         "masks_dir": dataset_config.get("masks_dir"),
         "n_images_found": 0,
         "n_annotations_or_masks_found": 0,
+        "n_images": 0,
+        "n_masks": 0,
+        "n_pairs": 0,
+        "missing_mask_count": 0,
+        "missing_image_count": 0,
         "n_valid_samples_estimated": 0,
         "n_missing_images": 0,
         "n_empty_masks": 0,
@@ -164,33 +169,59 @@ def _preflight_mask_folder(dataset_name: str, dataset_config: dict, benchmark_id
     stats = mask_folder_stats(images_dir, masks_dir, image_glob=image_glob, mask_glob=mask_glob)
     report["n_images_found"] = stats["n_images_found"]
     report["n_annotations_or_masks_found"] = stats["n_masks_found"]
+    report["n_images"] = stats["n_images_found"]
+    report["n_masks"] = stats["n_masks_found"]
+    report["n_pairs"] = stats["n_pairs"]
+    report["missing_mask_count"] = stats.get("missing_mask_count", 0)
+    report["missing_image_count"] = stats.get("missing_image_count", 0)
     report["n_valid_samples_estimated"] = stats["n_valid"]
     report["n_empty_masks"] = stats["n_empty_masks"]
     report["n_shape_mismatch"] = stats["n_shape_mismatch"]
     if report["n_empty_masks"] or report["n_shape_mismatch"]:
-        report["status"] = "warning"
+        report["status"] = "failed" if dataset_name == "dis5k" else "warning"
+        if report["n_empty_masks"]:
+            report["errors" if dataset_name == "dis5k" else "warnings"].append(f"empty_masks:{report['n_empty_masks']}")
+        if report["n_shape_mismatch"]:
+            report["errors" if dataset_name == "dis5k" else "warnings"].append(f"shape_mismatch:{report['n_shape_mismatch']}")
         lines.append(
             f"[WARN] mask folder issues: empty_masks={report['n_empty_masks']} "
             f"shape_mismatch={report['n_shape_mismatch']}"
         )
-    first = next(
-        iter(
-            iter_mask_folder_manifest_samples(
-                images_dir,
-                masks_dir,
-                benchmark_id,
-                dataset_name=dataset_name,
-                max_samples=1,
-                image_glob=image_glob,
-                mask_glob=mask_glob,
-                category_name=str(dataset_config.get("category_name") or "foreground_object"),
-                category_id=str(dataset_config.get("category_id") or dataset_config.get("category_name") or "foreground_object"),
-                default_difficulty_tags=list(dataset_config.get("default_difficulty_tags") or []),
+    if report["n_pairs"] <= 0 or report["n_valid_samples_estimated"] <= 0:
+        report["status"] = "failed"
+        report["errors"].append("no_valid_image_mask_pairs")
+        lines.append(f"[FAIL] no valid image/mask pairs found for {dataset_name}")
+        return
+    if report["status"] != "failed":
+        first = next(
+            iter(
+                iter_mask_folder_manifest_samples(
+                    images_dir,
+                    masks_dir,
+                    benchmark_id,
+                    dataset_name=dataset_name,
+                    max_samples=1,
+                    image_glob=image_glob,
+                    mask_glob=mask_glob,
+                    category_name=str(dataset_config.get("category_name") or "foreground_object"),
+                    category_id=str(dataset_config.get("category_id") or dataset_config.get("category_name") or "foreground_object"),
+                    default_difficulty_tags=list(dataset_config.get("default_difficulty_tags") or []),
+                )
             )
         )
-    )
-    report["difficulty_tag_preview"] = first.get("difficulty_tags", [])
-    lines.append(f"[OK] found {report['n_valid_samples_estimated']} image/mask pairs; parsed {first['sample_id']}")
+        report["difficulty_tag_preview"] = first.get("difficulty_tags", [])
+        report["sample_check"] = {
+            "sample_id": first.get("sample_id"),
+            "image_path": first.get("image_path"),
+            "mask_path": first.get("mask_path") or (first.get("metadata") or {}).get("mask_path"),
+            "width": first.get("width"),
+            "height": first.get("height"),
+            "bbox": first.get("gt_bbox_xyxy"),
+            "gt_area": first.get("gt_area"),
+            "binary_mask": True,
+            "boundary_metadata": first.get("boundary_metadata"),
+        }
+        lines.append(f"[OK] found {report['n_valid_samples_estimated']} image/mask pairs; parsed {first['sample_id']}")
 
 
 def _preflight_open_images(dataset_config: dict, benchmark_id: str, report: dict, lines: list[str]) -> None:

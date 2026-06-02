@@ -23,3 +23,5 @@ sampling:
     - large_object
     - touches_border
     - elongated_object
+    - thin_structure
+    - high_boundary_complexity

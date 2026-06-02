@@ -6,7 +6,7 @@ from typing import Iterable
 
 import numpy as np
 
-from image_segmentation.benchmark.metrics import mask_bbox, touches_border
+from image_segmentation.benchmark.metrics import mask_bbox, mask_shape_metadata, touches_border
 
 
 def iter_mask_folder_manifest_samples(
@@ -77,7 +77,8 @@ def load_mask_folder_sample(
         return None
     bbox = mask_bbox(mask)
     area_ratio = float(area / (width * height)) if width * height else 0.0
-    tags = _mask_difficulty_tags(mask, bbox, width, height, area_ratio)
+    boundary_metadata = mask_shape_metadata(mask, bbox)
+    tags = _mask_difficulty_tags(mask, bbox, width, height, area_ratio, boundary_metadata)
     for tag in default_difficulty_tags or []:
         if tag not in tags:
             tags.append(tag)
@@ -88,6 +89,7 @@ def load_mask_folder_sample(
         "image_id": image_path.stem,
         "annotation_id": image_path.stem,
         "image_path": str(image_path),
+        "mask_path": str(mask_path),
         "width": width,
         "height": height,
         "category_id": str(category_id),
@@ -97,6 +99,7 @@ def load_mask_folder_sample(
         "gt_area_ratio": area_ratio,
         "gt_touches_border": touches_border(mask, bbox, width, height),
         "difficulty_tags": tags,
+        "boundary_metadata": boundary_metadata,
         "split": benchmark_id,
         "metadata": {"mask_path": str(mask_path), "mask_threshold": 127},
     }
@@ -118,10 +121,16 @@ def mask_folder_stats(images_dir: str | Path, masks_dir: str | Path, image_glob:
         "n_images_found": len([p for p in image_root.glob(image_glob) if p.is_file()]),
         "n_masks_found": len(masks_by_stem),
         "n_pairs": 0,
+        "missing_mask_count": 0,
+        "missing_image_count": 0,
         "n_valid": 0,
         "n_empty_masks": 0,
         "n_shape_mismatch": 0,
     }
+    image_stems = {path.stem for path in image_root.glob(image_glob) if path.is_file()}
+    mask_stems = set(masks_by_stem)
+    stats["missing_mask_count"] = len(image_stems - mask_stems)
+    stats["missing_image_count"] = len(mask_stems - image_stems)
     for image_path in sorted(image_root.glob(image_glob)):
         if not image_path.is_file():
             continue
@@ -143,7 +152,14 @@ def mask_folder_stats(images_dir: str | Path, masks_dir: str | Path, image_glob:
     return stats
 
 
-def _mask_difficulty_tags(mask: np.ndarray, bbox: list[float] | None, width: int, height: int, area_ratio: float) -> list[str]:
+def _mask_difficulty_tags(
+    mask: np.ndarray,
+    bbox: list[float] | None,
+    width: int,
+    height: int,
+    area_ratio: float,
+    boundary_metadata: dict | None = None,
+) -> list[str]:
     tags: list[str] = []
     if area_ratio < 0.01:
         tags.append("small_object")
@@ -159,4 +175,9 @@ def _mask_difficulty_tags(mask: np.ndarray, bbox: list[float] | None, width: int
         aspect = box_width / box_height if box_height else 0.0
         if aspect > 4.0 or (aspect > 0 and aspect < 0.25):
             tags.append("elongated_object")
+    boundary_metadata = boundary_metadata or {}
+    if float(boundary_metadata.get("thin_structure_score") or 0.0) >= 0.60:
+        tags.append("thin_structure")
+    if float(boundary_metadata.get("perimeter_area_ratio") or 0.0) >= 0.50:
+        tags.append("high_boundary_complexity")
     return tags

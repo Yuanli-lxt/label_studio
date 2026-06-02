@@ -70,6 +70,34 @@ class BenchmarkLeakageTests(unittest.TestCase):
         self.assertFalse(first["evaluation_only"]["delta"]["major_correction"])
         self.assertTrue(second["evaluation_only"]["delta"]["major_correction"])
 
+    def test_review_queue_ignores_gt_boundary_metadata_and_boundary_delta(self):
+        base = candidate(False)
+        changed = candidate(False)
+        changed["boundary_metadata"] = {
+            "perimeter_px": 9999.0,
+            "perimeter_area_ratio": 999.0,
+            "thin_structure_score": 1.0,
+        }
+        changed["delta"].update(
+            {
+                "model_human_iou": 0.0,
+                "dice": 0.0,
+                "boundary": {
+                    "boundary_iou": 0.0,
+                    "boundary_f1": 0.0,
+                    "boundary_precision": 0.0,
+                    "boundary_recall": 0.0,
+                    "boundary_error_area_ratio": 1.0,
+                },
+            }
+        )
+        first = score_review_candidate(base)
+        second = score_review_candidate(changed)
+        self.assertEqual(first["priority_score"], second["priority_score"])
+        self.assertEqual(first["score_components"], second["score_components"])
+        self.assertNotIn("boundary_metadata", first["source_metadata"])
+        self.assertNotIn("boundary_metadata", second["source_metadata"])
+
     def test_manifest_does_not_use_delta_fields_for_sampling(self):
         source = inspect.getsource(sampling.sample_manifest_rows)
         for token in LEAKY_TOKENS:

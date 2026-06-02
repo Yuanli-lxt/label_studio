@@ -176,8 +176,37 @@ def _oof_summary(
             "correction_risk_only_meets_initial_effectiveness_standard"
         ),
         "bootstrap_ci": _full_priority_bootstrap_ci(comparison),
+        "boundary_diagnostics": _boundary_diagnostics(predictions),
         "recommendation": recommendation,
         "warnings": warnings,
+    }
+
+
+def _boundary_diagnostics(rows: list[dict]) -> dict:
+    with_boundary = [row for row in rows if isinstance((row.get("delta") or {}).get("boundary"), dict)]
+    if not with_boundary:
+        return {"available": False}
+    low_f1 = [
+        row for row in with_boundary
+        if _num(((row.get("delta") or {}).get("boundary") or {}).get("boundary_f1")) < 0.50
+    ]
+    major = [row for row in with_boundary if _is_major(row)]
+    return {
+        "available": True,
+        "boundary_metric_count": len(with_boundary),
+        "major_mean_boundary_f1": _mean([
+            _num(((row.get("delta") or {}).get("boundary") or {}).get("boundary_f1"))
+            for row in major
+            if ((row.get("delta") or {}).get("boundary") or {}).get("boundary_f1") is not None
+        ]),
+        "non_major_mean_boundary_f1": _mean([
+            _num(((row.get("delta") or {}).get("boundary") or {}).get("boundary_f1"))
+            for row in with_boundary
+            if not _is_major(row) and ((row.get("delta") or {}).get("boundary") or {}).get("boundary_f1") is not None
+        ]),
+        "low_boundary_f1_threshold": 0.50,
+        "low_boundary_f1_count": len(low_f1),
+        "low_boundary_f1_positive_rate": _positive_rate(low_f1),
     }
 
 
@@ -253,6 +282,10 @@ def _num(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _mean(values: list[float]) -> float | None:
+    return float(sum(values) / len(values)) if values else None
 
 
 def _dedupe(values: list[str]) -> list[str]:

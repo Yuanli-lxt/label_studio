@@ -65,8 +65,16 @@ def manual_dataset_message(dataset: str, output_dir: str) -> str:
     root = Path(output_dir) / dataset
     lines = [
         f"[MANUAL] {entry.display_name} requires manual download or an external archive.",
+        f"[PURPOSE] {entry.display_name} is used as a foreground/boundary stress dataset, not long-tail category validation.",
         f"[LICENSE] {entry.license_note}",
+        "[DOWNLOAD] Use the official dataset page or project release links; this CLI intentionally does not hard-code Google Drive/Baidu URLs.",
         "[LAYOUT] expected directory layout:",
+        f"  {root}/",
+        f"    images/",
+        f"    masks/",
+        f"[CONFIG] configs/benchmark_v0_1.{dataset}300.yaml",
+        f"[CONFIG] images_dir={root / 'images'}",
+        f"[CONFIG] masks_dir={root / 'masks'}",
     ]
     for local_dir in entry.expected_local_dirs:
         parts = Path(local_dir).parts
@@ -221,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.dataset in {"dis5k", "cod10k", "camo"}:
             print(manual_dataset_message(args.dataset, args.output_dir))
-            return 0 if allow_manual else 1
+            return 0 if args.dry_run or allow_manual else 1
         if args.dataset == "open_images_v7_segmentations":
             summary = download_open_images_subset(
                 args.output_dir,

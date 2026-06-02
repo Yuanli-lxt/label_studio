@@ -35,6 +35,32 @@ def candidate(idx=1, risk=0.0, uncertainty=True, delta_major=False, area=0.08):
             "mask_touches_border": risk_like,
             "valid_mask": True,
             "rle_length": 120,
+            "prediction_time_boundary_shape": {
+                "pred_area_ratio": area,
+                "pred_bbox_area_ratio": area * 1.2,
+                "pred_extent": 0.4 if risk_like else 0.9,
+                "pred_aspect_ratio": 5.0 if risk_like else 1.0,
+                "pred_touches_border": risk_like,
+                "pred_boundary_complexity": 8.0 if risk_like else 1.2,
+                "pred_boundary_density": 12.0 if risk_like else 2.0,
+                "pred_component_count": 3 if risk_like else 1,
+                "pred_largest_component_ratio": 0.6 if risk_like else 1.0,
+                "pred_hole_count": 1 if risk_like else 0,
+                "pred_thinness_proxy": 0.7 if risk_like else 0.1,
+            },
+        },
+        "prediction_features": {
+            "pred_area_ratio": area,
+            "pred_bbox_area_ratio": area * 1.2,
+            "pred_extent": 0.4 if risk_like else 0.9,
+            "pred_aspect_ratio": 5.0 if risk_like else 1.0,
+            "pred_touches_border": risk_like,
+            "pred_boundary_complexity": 8.0 if risk_like else 1.2,
+            "pred_boundary_density": 12.0 if risk_like else 2.0,
+            "pred_component_count": 3 if risk_like else 1,
+            "pred_largest_component_ratio": 0.6 if risk_like else 1.0,
+            "pred_hole_count": 1 if risk_like else 0,
+            "pred_thinness_proxy": 0.7 if risk_like else 0.1,
         },
         "review": {
             "needs_review": risk_like,
@@ -81,6 +107,7 @@ class SegmentationReviewQueueTests(unittest.TestCase):
         self.assertIn(item["priority_bucket"], ["high", "medium", "low"])
         self.assertIn("correction_risk_score", item["score_components"])
         self.assertIn("uncertainty_score", item["score_components"])
+        self.assertIn("boundary_shape_score", item["score_components"])
         self.assertIsInstance(item["review_reasons"], list)
         self.assertIn("high_correction_risk", item["review_reasons"])
         self.assertIn("source_metadata", item)
@@ -113,6 +140,31 @@ class SegmentationReviewQueueTests(unittest.TestCase):
         self.assertEqual(first["priority_score"], second["priority_score"])
         self.assertFalse(first["evaluation_only"]["delta"]["major_correction"])
         self.assertTrue(second["evaluation_only"]["delta"]["major_correction"])
+
+    def test_boundary_shape_score_uses_prediction_features_only(self):
+        base = candidate(risk=0.2, delta_major=False)
+        changed = candidate(risk=0.2, delta_major=True)
+        changed["boundary_metadata"] = {"perimeter_area_ratio": 100.0, "thin_structure_score": 1.0}
+        changed["delta"]["boundary"] = {"boundary_f1": 0.0, "boundary_error_area_ratio": 1.0}
+        weights = {
+            "correction_risk_score": 0.0,
+            "uncertainty_score": 0.0,
+            "rule_review_score": 0.0,
+            "geometry_complexity_score": 0.0,
+            "boundary_shape_score": 1.0,
+            "diversity_score": 0.0,
+        }
+        first = self.module.score_review_candidate(base, weights=weights)
+        second = self.module.score_review_candidate(changed, weights=weights)
+        self.assertEqual(first["priority_score"], second["priority_score"])
+        self.assertNotIn("boundary_metadata", first["source_metadata"])
+
+    def test_missing_prediction_features_backward_compatible(self):
+        row = candidate(risk=0.2)
+        row.pop("prediction_features", None)
+        row["mask_quality"].pop("prediction_time_boundary_shape", None)
+        item = self.module.score_review_candidate(row)
+        self.assertEqual(0.0, item["score_components"]["boundary_shape_score"])
 
     def test_queue_ordering_and_ranks_are_deterministic(self):
         records = [candidate(idx=1, risk=0.1), candidate(idx=2, risk=0.9), candidate(idx=3, risk=0.5)]

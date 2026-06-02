@@ -18,6 +18,7 @@ def queue_item(idx, major, score, components=None):
             "uncertainty_score": 1 - score,
             "rule_review_score": score / 2,
             "geometry_complexity_score": 0.1,
+            "boundary_shape_score": 0.3,
             "diversity_score": 0.2,
         },
         "source_metadata": {
@@ -28,10 +29,13 @@ def queue_item(idx, major, score, components=None):
                 "mean_pairwise_iou": 0.4 if major else 0.9,
             }
         },
-        "evaluation_only": {
+            "evaluation_only": {
             "delta": {
                 "major_correction": major,
                 "model_human_iou": 0.2 if major else 0.9,
+                "model_human_dice": 0.3 if major else 0.95,
+                "model_human_precision": 0.4 if major else 0.96,
+                "model_human_recall": 0.5 if major else 0.94,
                 "correction_area_ratio": 0.3 if major else 0.01,
                 "correction_reason": ["low_iou"] if major else [],
             }
@@ -69,6 +73,7 @@ class BenchmarkEvaluationReportTests(unittest.TestCase):
         )
         self.assertEqual(2, report["score_component_summary"]["correction_risk_score"]["non_null_count"])
         self.assertAlmostEqual(0.5, report["score_component_summary"]["correction_risk_score"]["mean"])
+        self.assertEqual(2, report["score_component_summary"]["boundary_shape_score"]["non_null_count"])
 
     def test_ap_below_base_rate_warning(self):
         items = [
@@ -165,6 +170,23 @@ class BenchmarkEvaluationReportTests(unittest.TestCase):
         )
         self.assertEqual("r", report["category_frequency_breakdown"][0]["frequency"])
         self.assertIn("Category Frequency Breakdown", render_markdown_report(report))
+
+    def test_boundary_metrics_added_to_report(self):
+        item = queue_item(1, True, 0.8)
+        item["evaluation_only"]["delta"]["boundary"] = {
+            "boundary_iou": 0.3,
+            "boundary_f1": 0.4,
+            "boundary_precision": 0.5,
+            "boundary_recall": 0.35,
+            "boundary_error_area_ratio": 0.2,
+        }
+        report = build_evaluation_report(
+            [item],
+            [{"dataset": "DIS5K", "difficulty_tags": ["thin_structure"], "delta": item["evaluation_only"]["delta"]}],
+        )
+        self.assertEqual(0.4, report["boundary_quality"]["mean_boundary_f1"])
+        self.assertIn("Boundary Quality", render_markdown_report(report))
+        self.assertIn("Boundary Stress Diagnostics", render_markdown_report(report))
 
 
 if __name__ == "__main__":

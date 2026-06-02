@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from image_segmentation.benchmark.compare_benchmark_runs import compare_benchmark_runs
+from image_segmentation.benchmark.compare_benchmark_runs import compare_benchmark_runs, compare_benchmark_runs_multi
 
 
 def _write(path: Path, payload: dict):
@@ -26,6 +26,7 @@ def _report(rate=0.2):
             "category_level_major_correction_top20": [{"dataset": "thing", "major_correction_rate": rate}],
             "difficulty_tag_major_correction_rates": [{"tag": "small_object", "major_correction_rate": rate}],
         },
+        "boundary_quality": {"mean_boundary_f1": 0.55},
         "category_frequency_breakdown": [{"frequency": "r", "major_correction_rate": rate}],
     }
 
@@ -81,3 +82,22 @@ def test_compare_benchmark_runs_recommendation_present(tmp_path):
     result = compare_benchmark_runs("A", str(left_report), None, None, "B", str(right_report), None, None, str(out))
     assert result["recommendation"]
     assert "Recommendation" in out.read_text(encoding="utf-8")
+
+
+def test_compare_benchmark_runs_multi_run_outputs_report(tmp_path):
+    specs = []
+    for name in ["COCO1000", "LVIS500", "DIS5K300"]:
+        report = tmp_path / f"{name}_report.json"
+        oof = tmp_path / f"{name}_oof.json"
+        ablation = tmp_path / f"{name}_ablation.json"
+        _write(report, _report(0.3))
+        _write(oof, {"positive_count": 3, "oof_pr_auc": 0.6, "fold_positive_counts": [1, 1, 1]})
+        _write(ablation, _ablation())
+        specs.append(f"{name}:{report}:{oof}:{ablation}")
+    out = tmp_path / "multi.md"
+    result = compare_benchmark_runs_multi(specs, str(out))
+    assert len(result["runs"]) == 3
+    text = out.read_text(encoding="utf-8")
+    assert "DIS5K300" in text
+    assert "boundary F1" in text
+    assert "risk_heavy beats current across all runs" in text

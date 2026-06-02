@@ -27,6 +27,63 @@ def compare_benchmark_runs(
     return {"left": left, "right": right, "recommendation": recommendation, "output": str(output_path)}
 
 
+def compare_benchmark_runs_multi(runs: list[str], output: str) -> dict:
+    bundles = [_parse_run_spec(spec) for spec in runs]
+    recommendation = _multi_recommendation(bundles)
+    markdown = render_multi_markdown(bundles, recommendation)
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(markdown, encoding="utf-8")
+    return {"runs": bundles, "recommendation": recommendation, "output": str(output_path)}
+
+
+def render_multi_markdown(runs: list[dict], recommendation: str) -> str:
+    names = [run["name"] for run in runs]
+    lines = [
+        "# Benchmark Run Comparison",
+        "",
+        "## Quality Comparison",
+        "| metric | " + " | ".join(names) + " |",
+        "| --- | " + " | ".join(["---:"] * len(runs)) + " |",
+    ]
+    for key, label in [
+        ("samples", "samples"),
+        ("mean_iou", "mean IoU"),
+        ("median_iou", "median IoU"),
+        ("dice", "Dice"),
+        ("precision", "precision"),
+        ("recall", "recall"),
+        ("boundary_f1", "boundary F1"),
+        ("major_correction_count", "major correction count"),
+        ("major_correction_rate", "major correction base rate"),
+    ]:
+        lines.append("| " + label + " | " + " | ".join(_fmt(run["quality"].get(key)) for run in runs) + " |")
+    lines.extend(["", "## OOF Risk Comparison", "| metric | " + " | ".join(names) + " |", "| --- | " + " | ".join(["---:"] * len(runs)) + " |"])
+    for key, label in [
+        ("positive_count", "positive count"),
+        ("oof_pr_auc", "PR-AUC"),
+        ("oof_roc_auc", "ROC-AUC"),
+        ("oof_brier_score", "Brier score"),
+        ("fold_positive_counts", "fold positive counts"),
+    ]:
+        lines.append("| " + label + " | " + " | ".join(_fmt(run["oof"].get(key)) for run in runs) + " |")
+    lines.extend(["", "## Strategy Comparison"])
+    for run in runs:
+        lines.append(f"- {run['name']} best by AP: {run['strategy'].get('best_by_ap')}")
+    lines.append(f"- risk_heavy beats current across all runs: {_bool_text(all(_beats_current(run, 'risk_heavy') for run in runs))}")
+    lines.append(f"- risk_only remains strongest across all runs: {_bool_text(all(_is_best(run, 'risk_only') for run in runs))}")
+    lines.extend(["", "| preset metric | " + " | ".join(names) + " |", "| --- | " + " | ".join(["---:"] * len(runs)) + " |"])
+    for preset in ["current_full_priority", "risk_heavy", "risk_only", "no_diversity", "boundary_shape_experimental"]:
+        for metric in ["average_precision_for_major_correction", "lift_at_20_percent_over_random"]:
+            lines.append("| " + f"{preset} {metric}" + " | " + " | ".join(_fmt(_preset_metric(run, preset, metric)) for run in runs) + " |")
+    lines.extend(["", "## Failure-Mode Comparison"])
+    for run in runs:
+        lines.append(f"- {run['name']} top failure categories: {_top_failures(run)}")
+        lines.append(f"- {run['name']} difficulty/boundary diagnostics: {run['failure_modes'].get('difficulty_tags')}")
+    lines.extend(["", "## Recommendation", f"- {recommendation}", "", "## Leakage Guard", "- Boundary metrics and GT-derived manifest metadata are evaluation-only and are not priority scoring inputs.", ""])
+    return "\n".join(lines)
+
+
 def render_markdown(left: dict, right: dict, recommendation: str) -> str:
     return "\n".join(
         [
@@ -103,6 +160,7 @@ def _run_bundle(name: str, report_path: str, oof_path: str | None, ablation_path
 
 def _quality(report: dict) -> dict:
     overall = report.get("overall_quality") or {}
+    boundary = report.get("boundary_quality") or {}
     return {
         "samples": overall.get("n_samples"),
         "n_unique_images": overall.get("n_unique_images"),
@@ -112,6 +170,7 @@ def _quality(report: dict) -> dict:
         "dice": overall.get("mean_dice"),
         "precision": overall.get("mean_precision"),
         "recall": overall.get("mean_recall"),
+        "boundary_f1": boundary.get("mean_boundary_f1"),
         "major_correction_count": overall.get("major_correction_count"),
         "major_correction_rate": overall.get("major_correction_rate"),
     }
@@ -129,11 +188,19 @@ def _strategy(ablation: dict) -> dict:
 
 def _failure_modes(report: dict) -> dict:
     diagnostics = report.get("major_correction_diagnostics") or {}
+    boundary = report.get("boundary_stress_diagnostics") or {}
     return {
         "top_failure_categories": diagnostics.get("category_level_major_correction_top20") or [],
-        "difficulty_tags": diagnostics.get("difficulty_tag_major_correction_rates") or [],
+        "difficulty_tags": boundary.get("difficulty_tags") or diagnostics.get("difficulty_tag_major_correction_rates") or [],
         "frequency_breakdown": report.get("category_frequency_breakdown") or diagnostics.get("category_frequency_breakdown") or [],
     }
+
+
+def _parse_run_spec(spec: str) -> dict:
+    parts = spec.split(":", 3)
+    if len(parts) != 4:
+        raise ValueError("--run must be NAME:evaluation_report.json:oof_summary.json:weight_ablation.json")
+    return _run_bundle(parts[0], parts[1], parts[2], parts[3])
 
 
 def _metric_rows(left: dict, right: dict, metrics: list[tuple[str, str]]) -> list[str]:
@@ -142,7 +209,7 @@ def _metric_rows(left: dict, right: dict, metrics: list[tuple[str, str]]) -> lis
 
 def _strategy_rows(left: dict, right: dict) -> list[str]:
     rows = []
-    for preset in ["current_full_priority", "risk_only", "risk_heavy", "risk_dominant", "no_diversity", "balanced_no_risk"]:
+    for preset in ["current_full_priority", "risk_only", "risk_heavy", "risk_dominant", "no_diversity", "balanced_no_risk", "boundary_shape_experimental"]:
         for metric in ["average_precision_for_major_correction", "lift_at_20_percent_over_random"]:
             rows.append(f"| {preset} {metric} | {_fmt(_preset_metric(left, preset, metric))} | {_fmt(_preset_metric(right, preset, metric))} |")
     return rows
@@ -183,6 +250,20 @@ def _recommendation(left: dict, right: dict) -> str:
     return "Keep the current default unchanged; continue with DIS5K or COD10K validation before Layer 5 tuning."
 
 
+def _multi_recommendation(runs: list[dict]) -> str:
+    risk_heavy_all = all(_beats_current(run, "risk_heavy") for run in runs)
+    dis5k = next((run for run in runs if "DIS5K" in run["name"].upper()), None)
+    if risk_heavy_all:
+        base = "Keep the default unchanged, but promote risk_heavy as a strong experimental preset across the compared runs."
+    else:
+        base = "Keep the default unchanged; preset behavior is not yet consistent across all compared runs."
+    if dis5k and _num(dis5k["quality"].get("boundary_f1")) and _num(dis5k["quality"].get("boundary_f1")) < 0.60:
+        return base + " DIS5K boundary quality is weak enough to prioritize prediction-time boundary features before COD10K/CAMO."
+    if dis5k:
+        return base + " If boundary failures remain captured by risk, COD10K/CAMO low-contrast uncertainty stress is the next useful validation."
+    return base
+
+
 def _read_json(path: str | None) -> dict:
     if not path:
         return {}
@@ -215,12 +296,13 @@ def _bool_text(value: bool) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compare two benchmark runs.")
-    parser.add_argument("--left-name", required=True)
-    parser.add_argument("--left-report", required=True)
+    parser.add_argument("--run", action="append", default=[], help="NAME:report:oof_summary:weight_ablation; may be repeated")
+    parser.add_argument("--left-name")
+    parser.add_argument("--left-report")
     parser.add_argument("--left-oof")
     parser.add_argument("--left-ablation")
-    parser.add_argument("--right-name", required=True)
-    parser.add_argument("--right-report", required=True)
+    parser.add_argument("--right-name")
+    parser.add_argument("--right-report")
     parser.add_argument("--right-oof")
     parser.add_argument("--right-ablation")
     parser.add_argument("--output", required=True)
@@ -230,7 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        result = compare_benchmark_runs(
+        if args.run:
+            result = compare_benchmark_runs_multi(args.run, args.output)
+        else:
+            if not args.left_name or not args.left_report or not args.right_name or not args.right_report:
+                raise ValueError("provide either repeated --run specs or the legacy left/right arguments")
+            result = compare_benchmark_runs(
             left_name=args.left_name,
             left_report=args.left_report,
             left_oof=args.left_oof,
@@ -240,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
             right_oof=args.right_oof,
             right_ablation=args.right_ablation,
             output=args.output,
-        )
+            )
     except Exception as exc:
         print(f"[ERROR] {exc}")
         return 1

@@ -118,6 +118,13 @@ def build_manifest(config_path: str, output_path: str, summary_output: str | Non
             summary["skipped_annotation_reasons"] = stats["skipped_annotation_reasons"]
         except Exception as exc:
             summary.setdefault("warnings", []).append(f"lvis_summary_stats_unavailable: {exc}")
+    if any(str(row.get("dataset")).upper() == "DIS5K" for row in rows):
+        summary["boundary_complexity_distribution"] = _distribution(
+            [_num((row.get("boundary_metadata") or {}).get("perimeter_area_ratio")) for row in rows]
+        )
+        summary["thin_structure_count"] = sum(1 for row in rows if "thin_structure" in (row.get("difficulty_tags") or []))
+        summary["touches_border_count"] = sum(1 for row in rows if "touches_border" in (row.get("difficulty_tags") or []))
+        summary["skipped_samples"] = []
     if summary_output:
         summary_path = Path(summary_output)
         summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +155,11 @@ def manifest_summary(rows: list[dict], seed: int = 42, warnings: list[str] | Non
         "difficulty_tag_distribution": dict(sorted(tag_counts.items())),
         "max_instances_per_image_observed": max(image_counts.values()) if image_counts else 0,
         "area_ratio_distribution": _distribution(area_ratios),
+        "boundary_complexity_distribution": _distribution(
+            [_num((row.get("boundary_metadata") or {}).get("perimeter_area_ratio")) for row in rows if isinstance(row.get("boundary_metadata"), dict)]
+        ),
+        "thin_structure_count": sum(1 for row in rows if "thin_structure" in (row.get("difficulty_tags") or [])),
+        "touches_border_count": sum(1 for row in rows if "touches_border" in (row.get("difficulty_tags") or [])),
         "random_seed": int(seed),
         "warnings": warnings or [],
     }

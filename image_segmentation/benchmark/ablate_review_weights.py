@@ -21,6 +21,7 @@ COMPONENTS = [
     "uncertainty_score",
     "rule_review_score",
     "geometry_complexity_score",
+    "boundary_shape_score",
     "diversity_score",
 ]
 
@@ -34,6 +35,7 @@ DEFAULT_PRESETS = {
         "uncertainty_score": 0.0,
         "rule_review_score": 0.0,
         "geometry_complexity_score": 0.0,
+        "boundary_shape_score": 0.0,
         "diversity_score": 0.0,
     },
     "risk_heavy": {
@@ -41,6 +43,7 @@ DEFAULT_PRESETS = {
         "uncertainty_score": 0.10,
         "rule_review_score": 0.10,
         "geometry_complexity_score": 0.10,
+        "boundary_shape_score": 0.0,
         "diversity_score": 0.05,
     },
     "risk_dominant": {
@@ -48,6 +51,7 @@ DEFAULT_PRESETS = {
         "uncertainty_score": 0.05,
         "rule_review_score": 0.05,
         "geometry_complexity_score": 0.05,
+        "boundary_shape_score": 0.0,
         "diversity_score": 0.05,
     },
     "uncertainty_heavy": {
@@ -55,6 +59,7 @@ DEFAULT_PRESETS = {
         "uncertainty_score": 0.35,
         "rule_review_score": 0.10,
         "geometry_complexity_score": 0.10,
+        "boundary_shape_score": 0.0,
         "diversity_score": 0.10,
     },
     "quality_heavy": {
@@ -62,6 +67,7 @@ DEFAULT_PRESETS = {
         "uncertainty_score": 0.10,
         "rule_review_score": 0.30,
         "geometry_complexity_score": 0.15,
+        "boundary_shape_score": 0.0,
         "diversity_score": 0.10,
     },
     "no_diversity": {
@@ -69,6 +75,7 @@ DEFAULT_PRESETS = {
         "uncertainty_score": 0.15,
         "rule_review_score": 0.15,
         "geometry_complexity_score": 0.15,
+        "boundary_shape_score": 0.0,
         "diversity_score": 0.0,
     },
     "balanced_no_risk": {
@@ -76,7 +83,17 @@ DEFAULT_PRESETS = {
         "uncertainty_score": 0.25,
         "rule_review_score": 0.30,
         "geometry_complexity_score": 0.25,
+        "boundary_shape_score": 0.0,
         "diversity_score": 0.20,
+    },
+    "boundary_shape_experimental": {
+        "correction_risk_score": 0.25,
+        "uncertainty_score": 0.10,
+        "rule_review_score": 0.20,
+        "geometry_complexity_score": 0.15,
+        "boundary_shape_score": 0.20,
+        "diversity_score": 0.10,
+        "description": "Experimental prediction-time boundary/shape fusion; does not use GT boundary metadata or delta metrics.",
     },
 }
 
@@ -280,6 +297,8 @@ def pairwise_comparisons(results: dict) -> dict:
         ("risk_heavy", "risk_only"),
         ("no_diversity", "current_full_priority"),
         ("balanced_no_risk", "current_full_priority"),
+        ("boundary_shape_experimental", "current_full_priority"),
+        ("boundary_shape_experimental", "risk_heavy"),
     ]
     out = {}
     for left, right in pairs:
@@ -300,6 +319,8 @@ def topk_overlaps(ranked_by_preset: dict[str, list[dict]]) -> dict:
         ("current_full_priority", "risk_heavy"),
         ("current_full_priority", "risk_only"),
         ("risk_heavy", "risk_only"),
+        ("current_full_priority", "boundary_shape_experimental"),
+        ("risk_heavy", "boundary_shape_experimental"),
     ]
     out = {}
     for left, right in pairs:

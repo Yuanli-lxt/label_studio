@@ -34,7 +34,68 @@ def test_preflight_json_output(tmp_path):
     assert ok
     assert out.exists()
     assert json.loads(out.read_text())["datasets"][0]["loader_type"] == "mask_folder"
+    assert json.loads(out.read_text())["datasets"][0]["n_pairs"] == 1
     assert any("build_manifest" in line for line in lines)
+
+
+def test_dis5k_preflight_json_output_fields(tmp_path):
+    images = tmp_path / "images"
+    masks = tmp_path / "masks"
+    images.mkdir()
+    masks.mkdir()
+    Image.new("RGB", (5, 5), "white").save(images / "a.jpg")
+    mask = Image.new("L", (5, 5), 0)
+    mask.putpixel((2, 2), 255)
+    mask.save(masks / "a.png")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "\n".join(["benchmark_id: bench", "datasets:", "  dis5k:", "    enabled: true", f"    images_dir: {images}", f"    masks_dir: {masks}"]),
+        encoding="utf-8",
+    )
+    out = tmp_path / "preflight.json"
+    ok, _ = run_preflight(str(config), json_output=str(out))
+    report = json.loads(out.read_text())["datasets"][0]
+    assert ok
+    assert report["dataset"] == "DIS5K"
+    assert report["status"] == "ok"
+    assert report["n_images"] == 1
+    assert report["n_masks"] == 1
+    assert report["n_pairs"] == 1
+    assert report["sample_check"]["gt_area"] == 1
+
+
+def test_dis5k_preflight_detects_empty_mask(tmp_path):
+    images = tmp_path / "images"
+    masks = tmp_path / "masks"
+    images.mkdir()
+    masks.mkdir()
+    Image.new("RGB", (5, 5), "white").save(images / "a.jpg")
+    Image.new("L", (5, 5), 0).save(masks / "a.png")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "\n".join(["benchmark_id: bench", "datasets:", "  dis5k:", "    enabled: true", f"    images_dir: {images}", f"    masks_dir: {masks}"]),
+        encoding="utf-8",
+    )
+    ok, lines = run_preflight(str(config))
+    assert not ok
+    assert any("empty_masks=1" in line for line in lines)
+
+
+def test_dis5k_preflight_detects_size_mismatch(tmp_path):
+    images = tmp_path / "images"
+    masks = tmp_path / "masks"
+    images.mkdir()
+    masks.mkdir()
+    Image.new("RGB", (5, 5), "white").save(images / "a.jpg")
+    Image.new("L", (4, 4), 255).save(masks / "a.png")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "\n".join(["benchmark_id: bench", "datasets:", "  dis5k:", "    enabled: true", f"    images_dir: {images}", f"    masks_dir: {masks}"]),
+        encoding="utf-8",
+    )
+    ok, lines = run_preflight(str(config))
+    assert not ok
+    assert any("shape_mismatch=1" in line for line in lines)
 
 
 def test_preflight_reports_loader_type(tmp_path):

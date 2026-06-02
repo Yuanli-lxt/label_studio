@@ -21,6 +21,7 @@ def item(idx, major, priority=0.0, components=None):
             "uncertainty_score": 1.0 - priority,
             "rule_review_score": priority / 2,
             "geometry_complexity_score": 0.2,
+            "boundary_shape_score": 0.3,
             "diversity_score": 0.1,
         }
         if components is None
@@ -53,6 +54,7 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
             "quality_heavy",
             "no_diversity",
             "balanced_no_risk",
+            "boundary_shape_experimental",
         ]:
             self.assertIn(name, DEFAULT_PRESETS)
 
@@ -143,6 +145,49 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
                 "n_samples",
             ]:
                 self.assertIn(field, row)
+
+    def test_boundary_shape_experimental_preset_schema(self):
+        weights = normalize_preset_weights(DEFAULT_PRESETS["boundary_shape_experimental"])
+        self.assertIn("boundary_shape_score", weights)
+        self.assertGreater(weights["boundary_shape_score"], 0.0)
+        self.assertAlmostEqual(1.0, sum(weights.values()))
+
+    def test_ablate_review_weights_missing_boundary_shape_backward_compatible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = [item(i, i in {2, 4}, priority=i / 10) for i in range(1, 6)]
+            for row in rows:
+                row["score_components"].pop("boundary_shape_score", None)
+            queue = write_queue(root, rows)
+            result = ablate_review_weights(str(queue), str(root / "out"))
+            self.assertIn("boundary_shape_experimental", result["presets"])
+            self.assertGreater(result["component_diagnostics"]["boundary_shape_score"]["missing_count"], 0)
+
+    def test_boundary_shape_ablation_does_not_use_evaluation_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            components = {
+                "correction_risk_score": 0.0,
+                "uncertainty_score": 0.0,
+                "rule_review_score": 0.0,
+                "geometry_complexity_score": 0.0,
+                "boundary_shape_score": 0.5,
+                "diversity_score": 0.0,
+            }
+            base = item(1, False, components=components)
+            changed = item(2, True, components=dict(components))
+            changed["source_metadata"] = {"boundary_metadata": {"perimeter_area_ratio": 999.0}}
+            changed["evaluation_only"] = {
+                "delta": {
+                    "major_correction": True,
+                    "model_human_iou": 0.0,
+                    "boundary": {"boundary_f1": 0.0, "boundary_error_area_ratio": 1.0},
+                }
+            }
+            queue = write_queue(root, [base, changed])
+            ablate_review_weights(str(queue), str(root / "out"))
+            ranked = read_jsonl(root / "out" / "preset_rankings" / "boundary_shape_experimental.review_queue.jsonl")
+            self.assertEqual(ranked[0]["ablation_priority_score"], ranked[1]["ablation_priority_score"])
 
     def test_ablation_bootstrap_ci_present(self):
         with tempfile.TemporaryDirectory() as tmp:

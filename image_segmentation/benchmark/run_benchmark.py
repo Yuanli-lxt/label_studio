@@ -15,7 +15,7 @@ import numpy as np
 
 from image_segmentation.benchmark.datasets.coco import segmentation_to_mask
 from image_segmentation.benchmark.evaluation import build_evaluation_report, render_markdown_report
-from image_segmentation.benchmark.metrics import mask_bbox
+from image_segmentation.benchmark.metrics import boundary_metrics, mask_bbox, prediction_time_boundary_shape_features
 from image_segmentation.benchmark.schema import clip_xyxy
 
 
@@ -203,7 +203,7 @@ def _build_rows(
             _rewrite_result_mask(result, model_mask, width, height, model_bbox)
         _refresh_quality_metadata(result, model_mask, sample, backend_info)
         meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
-        gt_mask = segmentation_to_mask(sample.get("gt_segmentation"), width, height, int(sample.get("gt_iscrowd") or 0))
+        gt_mask = _gt_mask_for_sample(sample, width, height)
         if model_mask.shape != gt_mask.shape:
             raise ValueError(
                 f"prediction and GT mask shape mismatch for {sample.get('sample_id')}: "
@@ -215,6 +215,7 @@ def _build_rows(
         if model_bbox is not None:
             _validate_bbox_in_bounds("model_bbox", model_bbox, width, height)
         _validate_bbox_in_bounds("human_bbox", gt_bbox, width, height)
+        prediction_features = meta.get("prediction_features") if isinstance(meta.get("prediction_features"), dict) else {}
         delta = compute_mask_delta_metrics(
             model_mask,
             gt_mask,
@@ -223,6 +224,7 @@ def _build_rows(
             model_bbox=model_bbox,
             human_bbox=gt_bbox,
         )
+        delta["boundary"] = boundary_metrics(model_mask, gt_mask, tolerance_px=int(sample.get("boundary_tolerance_px") or 2))
         pred_row = {
             "benchmark_id": sample.get("benchmark_id"),
             "dataset": sample.get("dataset"),
@@ -241,6 +243,7 @@ def _build_rows(
             "prediction": prediction,
             "result": result,
             "mask_quality": meta.get("mask_quality"),
+            "prediction_features": prediction_features,
             "review": meta.get("review"),
             "uncertainty": meta.get("uncertainty"),
         }
@@ -264,9 +267,11 @@ def _build_rows(
             "model_mask_bbox": model_bbox,
             "human_mask_bbox": gt_bbox,
             "mask_quality": meta.get("mask_quality"),
+            "prediction_features": prediction_features,
             "review": meta.get("review"),
             "uncertainty": meta.get("uncertainty"),
             "difficulty_tags": sample.get("difficulty_tags") or [],
+            "boundary_metadata": sample.get("boundary_metadata"),
             "delta": delta,
             "record_status": "ok",
             "skip_reason": None,
@@ -463,6 +468,7 @@ def _refresh_quality_metadata(result: dict, mask: np.ndarray, sample: dict, back
         rle_length=len(rle) if isinstance(rle, list) else None,
         backend_metadata=meta,
     )
+    prediction_features = prediction_time_boundary_shape_features(mask, width=width, height=height)
     meta.update(
         {
             "backend_requested": backend_info["backend_requested"],
@@ -471,6 +477,7 @@ def _refresh_quality_metadata(result: dict, mask: np.ndarray, sample: dict, back
             "prompt_box": prompt_bbox,
             "prompt_coordinate_system": "pixel_xyxy",
             "mask_bbox": model_bbox,
+            "prediction_features": prediction_features,
         }
     )
     uncertainty = meta.get("uncertainty") if isinstance(meta.get("uncertainty"), dict) else None
@@ -481,6 +488,7 @@ def _refresh_quality_metadata(result: dict, mask: np.ndarray, sample: dict, back
                 round(float(uncertainty["disagreement_area_ratio"]) * width * height)
             )
     meta.update(quality)
+    meta.setdefault("mask_quality", {}).setdefault("prediction_time_boundary_shape", prediction_features)
     result["original_width"] = width
     result["original_height"] = height
 
@@ -563,6 +571,25 @@ def _resize_mask_to_shape(mask: np.ndarray, width: int, height: int) -> np.ndarr
         return (np.asarray(resized) > 0).astype(np.uint8)
     except Exception as exc:
         raise ValueError(f"could not resize prediction mask to {width}x{height}: {exc}") from exc
+
+
+def _gt_mask_for_sample(sample: dict, width: int, height: int) -> np.ndarray:
+    mask_path = sample.get("mask_path") or ((sample.get("metadata") or {}).get("mask_path") if isinstance(sample.get("metadata"), dict) else None)
+    if mask_path:
+        path = Path(str(mask_path))
+        resolved = path if path.is_absolute() else ROOT / path
+        if not resolved.exists():
+            raise FileNotFoundError(f"benchmark GT mask file not found: {mask_path}")
+        from PIL import Image
+
+        with Image.open(resolved) as mask_image:
+            arr = np.asarray(mask_image.convert("L"))
+        if arr.shape != (height, width):
+            raise ValueError(
+                f"GT mask shape mismatch for {sample.get('sample_id')}: manifest={(height, width)}, mask={arr.shape}"
+            )
+        return (arr > 0).astype(np.uint8)
+    return segmentation_to_mask(sample.get("gt_segmentation"), width, height, int(sample.get("gt_iscrowd") or 0))
 
 
 def _integer_box(bbox: list[float], width: int, height: int) -> tuple[int, int, int, int]:

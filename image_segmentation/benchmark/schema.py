@@ -22,6 +22,11 @@ REQUIRED_MANIFEST_FIELDS = [
     "split",
 ]
 
+OPTIONAL_DATASET_FIELDS = [
+    "mask_path",
+    "boundary_metadata",
+]
+
 
 def coco_xywh_to_xyxy(bbox: Sequence[Any], width: int, height: int) -> list[float]:
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
@@ -61,4 +66,3 @@ def validate_manifest_sample(sample: dict) -> list[str]:
     if not sample.get("sample_id"):
         errors.append("sample_id is required")
     return errors
-

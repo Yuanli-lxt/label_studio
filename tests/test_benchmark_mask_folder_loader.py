@@ -27,6 +27,7 @@ def test_mask_folder_loader_pairs_by_stem(tmp_path):
     rows = list(iter_mask_folder_manifest_samples(images, masks, "bench", "dis5k"))
     assert len(rows) == 1
     assert rows[0]["image_id"] == "a"
+    assert rows[0]["mask_path"].endswith("a.png")
 
 
 def test_mask_folder_loader_binary_threshold(tmp_path):
@@ -39,6 +40,21 @@ def test_mask_folder_loader_bbox_from_mask(tmp_path):
     images, masks = _write_pair(tmp_path)
     row = next(iter(iter_mask_folder_manifest_samples(images, masks, "bench", "dis5k")))
     assert row["gt_bbox_xyxy"] == [2.0, 3.0, 5.0, 7.0]
+
+
+def test_dis5k_loader_pairs_image_and_mask_by_stem(tmp_path):
+    images, masks = _write_pair(tmp_path)
+    Image.new("RGB", (10, 10), "white").save(images / "unmatched.jpg")
+    rows = list(iter_mask_folder_manifest_samples(images, masks, "bench", "dis5k"))
+    assert [row["image_id"] for row in rows] == ["a"]
+
+
+def test_dis5k_manifest_has_boundary_metadata(tmp_path):
+    images, masks = _write_pair(tmp_path)
+    row = next(iter(iter_mask_folder_manifest_samples(images, masks, "bench", "dis5k")))
+    assert row["category_name"] == "foreground_object"
+    assert "boundary_metadata" in row
+    assert row["boundary_metadata"]["perimeter_px"] > 0
 
 
 def test_mask_folder_loader_empty_mask_warning(tmp_path):

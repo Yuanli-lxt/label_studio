@@ -448,6 +448,174 @@ smoke test 会检查 Docker/compose、container health、checkpoint/model state�
 
 Prompt-stability uncertainty 在 smoke script 中是可选的。先以 `IMAGE_SEG_PROMPT_STABILITY_ENABLED=true` 启动 backend，生成新的 prediction，然后添加 `--enable-prompt-stability`，要求最新持久化 prediction 中存在 `uncertainty` metadata。默认 smoke 命令不要求该项，因为 prompt-stability 会执行多次 MobileSAM inference。
 
+## DIS5K300 边界压力验证
+
+### 验证目的
+
+DIS5K300 用于 foreground segmentation / 高精细边界压力测试。它不是长尾类别验证。它主要测试精细边界质量、`correction_area_ratio`、细长结构、高边界复杂度，以及 bbox prompt 看似正确但 mask 边界仍需大量修正的情况。
+
+DIS5K 是 manual dataset。CLI 只输出人工准备说明，不隐式下载大数据，也不写死不稳定的 Google Drive/Baidu 链接：
+
+```bash
+python -m image_segmentation.benchmark.download_data \
+  --dataset dis5k \
+  --output-dir data/external \
+  --dry-run
+```
+
+### 数据目录
+
+默认本地目录结构：
+
+```text
+data/external/dis5k/
+  images/
+  masks/
+```
+
+image 和 mask 通过文件名 stem 配对。mask 应是二值 mask，或可用 `foreground > 0` 转成二值。默认要求 image/mask 尺寸一致。不自动下载 DIS5K；不自动 resize GT mask，除非 config 明确允许。
+
+### Preflight 命令
+
+```bash
+python -m image_segmentation.benchmark.preflight \
+  --config configs/benchmark_v0_1.dis5k300.yaml \
+  --json-output demo_data/model_state/image_segmentation/benchmark/dis5k300_preflight.json
+```
+
+preflight 会检查 `images_dir` / `masks_dir`、配对数量、missing image/mask count、empty masks、image/mask size mismatch、合法 bbox / area 和 `sample_check`。
+
+### Build Manifest 命令
+
+```bash
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.dis5k300.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest.jsonl \
+  --summary-output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest_summary.json
+```
+
+manifest 包含 `mask_path`、`category_name=foreground_object`、`gt_bbox_xyxy`、`difficulty_tags` 和 `boundary_metadata`。`boundary_metadata` 来自 GT mask，只能用于诊断和 evaluation breakdown；不能用于生产排序和 risk features，除非未来实现等价的 prediction-time boundary features。
+
+### MobileSAM GPU Benchmark 命令
+
+```bash
+export IMAGE_SEG_BACKEND=mobilesam
+export IMAGE_SEG_CHECKPOINT=/home/yuanli/projects/label-platform/models/mobilesam/mobile_sam.pt
+export IMAGE_SEG_DEVICE=cuda
+export CUDA_VISIBLE_DEVICES=0
+
+python -m image_segmentation.benchmark.run_benchmark \
+  --manifest demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu \
+  --backend mobile_sam \
+  --enable-prompt-stability false \
+  --risk-model-dir demo_data/model_state/image_segmentation/correction_risk \
+  --resume true
+```
+
+完整 DIS5K300 不开启 prompt-stability。使用 GPU，不允许 fallback。输出包括 `predictions.jsonl`、`correction_delta_dataset.jsonl`、`review_queue.jsonl`、`evaluation_report.json`、`evaluation_report.md` 和 `runtime_metadata.json`。
+
+### 边界指标解释
+
+- boundary IoU：带容忍边界带之间的 overlap。
+- boundary F1：boundary precision 和 boundary recall 的调和平均。
+- boundary precision：model boundary 被 GT boundary band 匹配的比例。
+- boundary recall：GT boundary 被 model boundary band 匹配的比例。
+- boundary error area ratio：model/human mask 对称差面积除以图像面积。
+
+IoU 高但 boundary F1 低，表示区域大体对但边界差。`high_boundary_complexity` / `thin_structure` 失败率高，说明可能需要 boundary-aware prediction-time features。
+
+### Prediction-Time Boundary/Shape Features
+
+benchmark 还会记录只来自 predicted mask 和 image size 的 prediction-time boundary/shape features：`pred_area_ratio`、`pred_bbox_area_ratio`、`pred_extent`、`pred_aspect_ratio`、`pred_touches_border`、`pred_boundary_complexity`、`pred_boundary_density`、`pred_component_count`、`pred_largest_component_ratio`、`pred_hole_count` 和 `pred_thinness_proxy`。
+
+这些字段写入 `prediction_features` 和 `mask_quality.prediction_time_boundary_shape`。它们可以安全用于 Layer 5 priority 实验，因为不使用 GT mask、IoU/Dice、boundary delta、major correction label 或 human mask。
+
+### OOF 风险评估
+
+```bash
+python -m image_segmentation.benchmark.crossfit_risk_evaluation \
+  --delta-dataset demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu/correction_delta_dataset.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof \
+  --n-splits 5 \
+  --random-seed 42 \
+  --bootstrap-iters 1000
+```
+
+初步有效性标准：
+
+```text
+OOF lift@20 > 1.5
+OOF AP > base rate
+OOF precision@20 > random expected precision
+```
+
+### 权重消融
+
+```bash
+python -m image_segmentation.benchmark.ablate_review_weights \
+  --review-queue demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof/oof_review_queue.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof_weight_ablation \
+  --bootstrap-iters 1000 \
+  --random-seed 42
+```
+
+重点比较 `current_full_priority`、`risk_heavy`、`risk_only` 和 `no_diversity`。
+
+`boundary_shape_experimental` preset 会给 `boundary_shape_score` 非零权重，但默认 Layer 5 权重保持不变。它只用于实验比较，除非跨数据集稳定，否则不要作为默认。
+
+### 三方比较
+
+```bash
+python -m image_segmentation.benchmark.compare_benchmark_runs \
+  --run COCO1000:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu/evaluation_report.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof/oof_summary.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_coco1000_mobile_sam_gpu_oof_weight_ablation/weight_ablation.json \
+  --run LVIS500:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu/evaluation_report.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof/oof_summary.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_lvis500_mobile_sam_gpu_oof_weight_ablation/weight_ablation.json \
+  --run DIS5K300:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu/evaluation_report.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof/oof_summary.json:demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_mobile_sam_gpu_oof_weight_ablation/weight_ablation.json \
+  --output demo_data/model_state/image_segmentation/benchmark/coco_lvis_dis5k_comparison.md
+```
+
+三方比较用于判断哪个数据集更难、`risk_heavy` 是否跨数据集优于 current、DIS5K 是否暴露边界型失败，以及是否需要新增 prediction-time boundary features。
+
+### 可选 DIS5K500
+
+只有在 DIS5K300 证据不足时才跑 DIS5K500：`positive_count < 30`、CI 太宽、ablation 结果不稳定，或 boundary diagnostics 样本不足。
+
+配置模板：
+
+```yaml
+benchmark_id: benchmark_v0_1_dis5k500
+random_seed: 42
+max_samples_total: 500
+
+datasets:
+  dis5k:
+    enabled: true
+    images_dir: data/external/dis5k/images
+    masks_dir: data/external/dis5k/masks
+    max_samples: 500
+
+sampling:
+  strategy: stratified
+  image_diversity: true
+  include_tags:
+    - small_object
+    - touches_border
+    - elongated_object
+    - thin_structure
+    - high_boundary_complexity
+```
+
+然后用 `dis5k500` 输出路径依次运行 `build_manifest`、`run_benchmark`、`crossfit_risk_evaluation` 和 `ablate_review_weights`。
+
+### 禁止事项
+
+- 不要用 GT-derived `boundary_metadata` 做生产排序。
+- 不要把 boundary delta metrics 当作 risk features。
+- 不要把 `boundary_shape_experimental` 当作默认权重修改。
+- 不要仅凭 DIS5K 一次结果修改默认 Layer 5 权重。
+- 不要做 Layer 6。
+- 不要在完整 DIS5K300 上默认开启 prompt-stability，除非明确做 uncertainty sanity run。
+
 ## 重新训练与验证
 
 触发并检查 segmentation retrain：
