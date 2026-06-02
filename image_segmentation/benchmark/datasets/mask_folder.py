@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fnmatch import fnmatch
 import warnings
 from pathlib import Path
 from typing import Iterable
@@ -21,14 +22,29 @@ def iter_mask_folder_manifest_samples(
     category_name: str = "foreground_object",
     category_id: str | None = None,
     default_difficulty_tags: list[str] | None = None,
+    include_image_patterns: list[str] | str | None = None,
+    include_mask_patterns: list[str] | str | None = None,
+    exclude_image_patterns: list[str] | str | None = None,
+    exclude_mask_patterns: list[str] | str | None = None,
 ) -> Iterable[dict]:
     if mask_match_strategy not in {"same_stem", "same_stem_strip_suffix"}:
         raise ValueError("mask_match_strategy must be 'same_stem' or 'same_stem_strip_suffix'")
     image_root = Path(images_dir)
     mask_root = Path(masks_dir)
-    masks_by_stem = _paths_by_match_stem(mask_root, mask_glob, mask_match_strategy)
+    masks_by_stem = _paths_by_match_stem(
+        mask_root,
+        mask_glob,
+        mask_match_strategy,
+        include_patterns=include_mask_patterns,
+        exclude_patterns=exclude_mask_patterns,
+    )
     count = 0
-    for image_path in _files_matching(image_root, image_glob):
+    for image_path in _files_matching(
+        image_root,
+        image_glob,
+        include_patterns=include_image_patterns,
+        exclude_patterns=exclude_image_patterns,
+    ):
         if image_path.is_dir():
             continue
         mask_path = masks_by_stem.get(_match_stem(image_path, mask_match_strategy))
@@ -111,9 +127,29 @@ def count_pairs(
     image_glob: str = "*.*",
     mask_glob: str = "*.png",
     mask_match_strategy: str = "same_stem",
+    include_image_patterns: list[str] | str | None = None,
+    include_mask_patterns: list[str] | str | None = None,
+    exclude_image_patterns: list[str] | str | None = None,
+    exclude_mask_patterns: list[str] | str | None = None,
 ) -> int:
-    image_stems = {_match_stem(path, mask_match_strategy) for path in _files_matching(Path(images_dir), image_glob)}
-    mask_stems = set(_paths_by_match_stem(Path(masks_dir), mask_glob, mask_match_strategy))
+    image_stems = {
+        _match_stem(path, mask_match_strategy)
+        for path in _files_matching(
+            Path(images_dir),
+            image_glob,
+            include_patterns=include_image_patterns,
+            exclude_patterns=exclude_image_patterns,
+        )
+    }
+    mask_stems = set(
+        _paths_by_match_stem(
+            Path(masks_dir),
+            mask_glob,
+            mask_match_strategy,
+            include_patterns=include_mask_patterns,
+            exclude_patterns=exclude_mask_patterns,
+        )
+    )
     return len(image_stems & mask_stems)
 
 
@@ -123,16 +159,39 @@ def mask_folder_stats(
     image_glob: str = "*.*",
     mask_glob: str = "*.png",
     mask_match_strategy: str = "same_stem",
+    include_image_patterns: list[str] | str | None = None,
+    include_mask_patterns: list[str] | str | None = None,
+    exclude_image_patterns: list[str] | str | None = None,
+    exclude_mask_patterns: list[str] | str | None = None,
 ) -> dict:
     from PIL import Image
 
     image_root = Path(images_dir)
     mask_root = Path(masks_dir)
-    image_paths = _files_matching(image_root, image_glob)
-    masks_by_stem = _paths_by_match_stem(mask_root, mask_glob, mask_match_strategy)
+    all_image_paths = _files_matching(image_root, image_glob)
+    all_mask_paths = _files_matching(mask_root, mask_glob)
+    image_paths = _filter_paths(
+        all_image_paths,
+        image_root,
+        include_patterns=include_image_patterns,
+        exclude_patterns=exclude_image_patterns,
+    )
+    mask_paths = _filter_paths(
+        all_mask_paths,
+        mask_root,
+        include_patterns=include_mask_patterns,
+        exclude_patterns=exclude_mask_patterns,
+    )
+    masks_by_stem = _paths_by_match_stem_from_paths(mask_paths, mask_match_strategy)
     stats = {
+        "n_images_scanned": len(all_image_paths),
+        "n_masks_scanned": len(all_mask_paths),
         "n_images_found": len(image_paths),
         "n_masks_found": len(masks_by_stem),
+        "n_images_excluded": len(all_image_paths) - len(image_paths),
+        "n_masks_excluded": len(all_mask_paths) - len(mask_paths),
+        "excluded_image_examples": [str(path) for path in _excluded_paths(all_image_paths, image_paths)[:5]],
+        "excluded_mask_examples": [str(path) for path in _excluded_paths(all_mask_paths, mask_paths)[:5]],
         "n_pairs": 0,
         "missing_mask_count": 0,
         "missing_image_count": 0,
@@ -165,7 +224,12 @@ def mask_folder_stats(
     return stats
 
 
-def _files_matching(root: Path, glob_spec: str) -> list[Path]:
+def _files_matching(
+    root: Path,
+    glob_spec: str,
+    include_patterns: list[str] | str | None = None,
+    exclude_patterns: list[str] | str | None = None,
+) -> list[Path]:
     patterns = [part.strip() for part in glob_spec.replace(";", ",").split(",") if part.strip()]
     if not patterns:
         patterns = ["*.*"]
@@ -174,14 +238,66 @@ def _files_matching(root: Path, glob_spec: str) -> list[Path]:
         for path in root.glob(pattern):
             if path.is_file():
                 paths[str(path)] = path
-    return sorted(paths.values())
+    return _filter_paths(sorted(paths.values()), root, include_patterns=include_patterns, exclude_patterns=exclude_patterns)
 
 
-def _paths_by_match_stem(root: Path, glob_spec: str, strategy: str) -> dict[str, Path]:
+def _filter_paths(
+    paths: list[Path],
+    root: Path,
+    include_patterns: list[str] | str | None = None,
+    exclude_patterns: list[str] | str | None = None,
+) -> list[Path]:
+    includes = _pattern_list(include_patterns)
+    excludes = _pattern_list(exclude_patterns)
+    out = []
+    for path in paths:
+        rel = path.relative_to(root).as_posix()
+        name = path.name
+        if includes and not any(_matches_pattern(rel, name, pattern) for pattern in includes):
+            continue
+        if excludes and any(_matches_pattern(rel, name, pattern) for pattern in excludes):
+            continue
+        out.append(path)
+    return out
+
+
+def _paths_by_match_stem(
+    root: Path,
+    glob_spec: str,
+    strategy: str,
+    include_patterns: list[str] | str | None = None,
+    exclude_patterns: list[str] | str | None = None,
+) -> dict[str, Path]:
+    return _paths_by_match_stem_from_paths(
+        _files_matching(root, glob_spec, include_patterns=include_patterns, exclude_patterns=exclude_patterns),
+        strategy,
+    )
+
+
+def _paths_by_match_stem_from_paths(paths: list[Path], strategy: str) -> dict[str, Path]:
     out: dict[str, Path] = {}
-    for path in _files_matching(root, glob_spec):
+    for path in paths:
         out.setdefault(_match_stem(path, strategy), path)
     return out
+
+
+def _pattern_list(value: list[str] | str | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.replace(";", ",").split(",")
+    else:
+        raw = value
+    return [str(part).strip() for part in raw if str(part).strip()]
+
+
+def _matches_pattern(relative_path: str, name: str, pattern: str) -> bool:
+    return fnmatch(relative_path, pattern) or fnmatch(name, pattern)
+
+
+def _excluded_paths(all_paths: list[Path], included_paths: list[Path]) -> list[Path]:
+    included = {str(path) for path in included_paths}
+    return [path for path in all_paths if str(path) not in included]
 
 
 def _match_stem(path: Path, strategy: str) -> str:

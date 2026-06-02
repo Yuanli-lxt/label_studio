@@ -117,7 +117,7 @@ python -m image_segmentation.benchmark.build_manifest \
   --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest.jsonl
 ```
 
-COD10K 和 CAMO 用于伪装、低对比度目标，以及 prompt-stability uncertainty 压力测试。它们复用 mask-folder loader，并默认添加 `low_contrast` 和 `camouflaged_object` 标签。期望手动放置：
+COD10K 和 CAMO 用于伪装、低对比度目标，以及 prompt-stability uncertainty 压力测试。它们复用 mask-folder loader，并默认添加 `low_contrast` 和 `camouflaged_object` 标签。推荐配置是 `configs/benchmark_v0_1.cod10k300.yaml` 和 `configs/benchmark_v0_1.camo250.yaml`。本地 CAMO split 是 250 对 image/mask。COD10K 目录可能混有 `COD10K-NonCAM-*` 空 mask；benchmark config 会过滤这些文件，只采样 `COD10K-CAM-*`，不移动也不删除数据。期望手动放置：
 
 ```text
 data/external/cod10k/images/
@@ -134,7 +134,10 @@ python -m image_segmentation.benchmark.build_manifest \
   --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_cod10k300_manifest.jsonl
 
 python -m image_segmentation.benchmark.download_data --dataset camo --output-dir data/external
-python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.camo300.yaml
+python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.camo250.yaml
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.camo250.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_camo250_manifest.jsonl
 ```
 
 Open Images V7 segmentations 用于遮挡、截断、group object 和 instance segmentation 多样性。第一版建议只下载 validation subset，不建议全量下载。可选 FiftyOne 路径需要 `pip install fiftyone`，并导出为：

@@ -10,6 +10,14 @@ datasets:
     max_samples: 300
     image_glob: "**/*.jpg,**/*.jpeg,**/*.png,**/*.bmp"
     mask_glob: "**/*.png,**/*.jpg,**/*.bmp"
+    include_image_patterns:
+      - "COD10K-CAM-*"
+    include_mask_patterns:
+      - "COD10K-CAM-*"
+    exclude_image_patterns:
+      - "COD10K-NonCAM-*"
+    exclude_mask_patterns:
+      - "COD10K-NonCAM-*"
     mask_match_strategy: same_stem
     category_name: camouflaged_object
     category_id: camouflaged_object

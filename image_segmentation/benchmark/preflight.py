@@ -62,6 +62,12 @@ def _preflight_dataset(dataset_name: str, dataset_config: dict, benchmark_id: st
         "masks_dir": dataset_config.get("masks_dir"),
         "n_images_found": 0,
         "n_annotations_or_masks_found": 0,
+        "n_images_scanned": 0,
+        "n_masks_scanned": 0,
+        "n_images_excluded": 0,
+        "n_masks_excluded": 0,
+        "excluded_image_examples": [],
+        "excluded_mask_examples": [],
         "n_images": 0,
         "n_masks": 0,
         "n_pairs": 0,
@@ -167,23 +173,46 @@ def _preflight_mask_folder(dataset_name: str, dataset_config: dict, benchmark_id
     image_glob = str(dataset_config.get("image_glob") or "*.*")
     mask_glob = str(dataset_config.get("mask_glob") or "*.png")
     mask_match_strategy = str(dataset_config.get("mask_match_strategy") or "same_stem")
+    include_image_patterns = dataset_config.get("include_image_patterns")
+    include_mask_patterns = dataset_config.get("include_mask_patterns")
+    exclude_image_patterns = dataset_config.get("exclude_image_patterns")
+    exclude_mask_patterns = dataset_config.get("exclude_mask_patterns")
     stats = mask_folder_stats(
         images_dir,
         masks_dir,
         image_glob=image_glob,
         mask_glob=mask_glob,
         mask_match_strategy=mask_match_strategy,
+        include_image_patterns=include_image_patterns,
+        include_mask_patterns=include_mask_patterns,
+        exclude_image_patterns=exclude_image_patterns,
+        exclude_mask_patterns=exclude_mask_patterns,
     )
+    report["n_images_scanned"] = stats["n_images_scanned"]
+    report["n_masks_scanned"] = stats["n_masks_scanned"]
     report["n_images_found"] = stats["n_images_found"]
     report["n_annotations_or_masks_found"] = stats["n_masks_found"]
     report["n_images"] = stats["n_images_found"]
     report["n_masks"] = stats["n_masks_found"]
+    report["n_images_excluded"] = stats["n_images_excluded"]
+    report["n_masks_excluded"] = stats["n_masks_excluded"]
+    report["excluded_image_examples"] = stats["excluded_image_examples"]
+    report["excluded_mask_examples"] = stats["excluded_mask_examples"]
     report["n_pairs"] = stats["n_pairs"]
     report["missing_mask_count"] = stats.get("missing_mask_count", 0)
     report["missing_image_count"] = stats.get("missing_image_count", 0)
     report["n_valid_samples_estimated"] = stats["n_valid"]
     report["n_empty_masks"] = stats["n_empty_masks"]
     report["n_shape_mismatch"] = stats["n_shape_mismatch"]
+    if report["n_images_excluded"] or report["n_masks_excluded"]:
+        lines.append(
+            f"[INFO] file filters excluded images={report['n_images_excluded']} "
+            f"masks={report['n_masks_excluded']}"
+        )
+        if report["excluded_image_examples"]:
+            lines.append(f"[INFO] excluded image examples: {report['excluded_image_examples']}")
+        if report["excluded_mask_examples"]:
+            lines.append(f"[INFO] excluded mask examples: {report['excluded_mask_examples']}")
     if report["n_empty_masks"] or report["n_shape_mismatch"]:
         report["status"] = "failed" if dataset_name == "dis5k" else "warning"
         if report["n_empty_masks"]:
@@ -211,6 +240,10 @@ def _preflight_mask_folder(dataset_name: str, dataset_config: dict, benchmark_id
                     image_glob=image_glob,
                     mask_glob=mask_glob,
                     mask_match_strategy=mask_match_strategy,
+                    include_image_patterns=include_image_patterns,
+                    include_mask_patterns=include_mask_patterns,
+                    exclude_image_patterns=exclude_image_patterns,
+                    exclude_mask_patterns=exclude_mask_patterns,
                     category_name=str(dataset_config.get("category_name") or "foreground_object"),
                     category_id=str(dataset_config.get("category_id") or dataset_config.get("category_name") or "foreground_object"),
                     default_difficulty_tags=list(dataset_config.get("default_difficulty_tags") or []),

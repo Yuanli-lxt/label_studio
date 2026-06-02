@@ -145,7 +145,7 @@ python -m image_segmentation.benchmark.build_manifest \
   --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_dis5k300_manifest.jsonl
 ```
 
-COD10K and CAMO are for camouflaged, low-contrast objects and prompt-stability uncertainty stress tests. They reuse the mask-folder loader and add `low_contrast` plus `camouflaged_object` tags by default. Manual placement is expected:
+COD10K and CAMO are for camouflaged, low-contrast objects and prompt-stability uncertainty stress tests. They reuse the mask-folder loader and add `low_contrast` plus `camouflaged_object` tags by default. The recommended configs are `configs/benchmark_v0_1.cod10k300.yaml` and `configs/benchmark_v0_1.camo250.yaml`. The local CAMO split is 250 image/mask pairs. COD10K directories may include `COD10K-NonCAM-*` files with empty masks; the benchmark config filters those out and only samples `COD10K-CAM-*` without moving or deleting data. Manual placement is expected:
 
 ```text
 data/external/cod10k/images/
@@ -162,7 +162,10 @@ python -m image_segmentation.benchmark.build_manifest \
   --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_cod10k300_manifest.jsonl
 
 python -m image_segmentation.benchmark.download_data --dataset camo --output-dir data/external
-python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.camo300.yaml
+python -m image_segmentation.benchmark.preflight --config configs/benchmark_v0_1.camo250.yaml
+python -m image_segmentation.benchmark.build_manifest \
+  --config configs/benchmark_v0_1.camo250.yaml \
+  --output demo_data/model_state/image_segmentation/benchmark/benchmark_v0_1_camo250_manifest.jsonl
 ```
 
 Open Images V7 segmentations are for occlusion, truncation, group-object, and instance-segmentation variety. Use only a validation subset at first; do not download the full dataset. The optional FiftyOne path requires `pip install fiftyone` and exports to:

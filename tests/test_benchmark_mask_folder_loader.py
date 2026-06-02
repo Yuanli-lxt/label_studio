@@ -80,6 +80,7 @@ def test_cod10k_config_exists():
 
 
 def test_camo_config_exists():
+    assert Path("configs/benchmark_v0_1.camo250.yaml").exists()
     assert Path("configs/benchmark_v0_1.camo300.yaml").exists()
     assert Path("configs/benchmark_v0_1.camo.yaml").exists()
 
@@ -137,3 +138,31 @@ def test_mask_folder_loader_supports_recursive_globs_and_mask_suffix(tmp_path):
     )
     assert len(rows) == 1
     assert rows[0]["image_id"] == "sample"
+
+
+def test_mask_folder_loader_include_exclude_patterns_filter_images_and_masks(tmp_path):
+    images = tmp_path / "images"
+    masks = tmp_path / "masks"
+    images.mkdir()
+    masks.mkdir()
+    for stem, mask_value in [("COD10K-CAM-good", 255), ("COD10K-NonCAM-empty", 0)]:
+        Image.new("RGB", (10, 10), "white").save(images / f"{stem}.jpg")
+        mask = Image.new("L", (10, 10), 0)
+        if mask_value:
+            for x in range(2, 5):
+                for y in range(3, 7):
+                    mask.putpixel((x, y), mask_value)
+        mask.save(masks / f"{stem}.png")
+    rows = list(
+        iter_mask_folder_manifest_samples(
+            images,
+            masks,
+            "bench",
+            "cod10k",
+            include_image_patterns=["COD10K-CAM-*"],
+            include_mask_patterns=["COD10K-CAM-*"],
+            exclude_image_patterns=["COD10K-NonCAM-*"],
+            exclude_mask_patterns=["COD10K-NonCAM-*"],
+        )
+    )
+    assert [row["image_id"] for row in rows] == ["COD10K-CAM-good"]

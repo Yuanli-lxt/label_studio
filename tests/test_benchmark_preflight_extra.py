@@ -98,6 +98,53 @@ def test_dis5k_preflight_detects_size_mismatch(tmp_path):
     assert any("shape_mismatch=1" in line for line in lines)
 
 
+def test_mask_folder_preflight_reports_include_exclude_filter_stats(tmp_path):
+    images = tmp_path / "images"
+    masks = tmp_path / "masks"
+    images.mkdir()
+    masks.mkdir()
+    for stem, mask_value in [("COD10K-CAM-good", 255), ("COD10K-NonCAM-empty", 0)]:
+        Image.new("RGB", (5, 5), "white").save(images / f"{stem}.jpg")
+        mask = Image.new("L", (5, 5), 0)
+        if mask_value:
+            mask.putpixel((2, 2), mask_value)
+        mask.save(masks / f"{stem}.png")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "benchmark_id: bench",
+                "datasets:",
+                "  cod10k:",
+                "    enabled: true",
+                f"    images_dir: {images}",
+                f"    masks_dir: {masks}",
+                "    include_image_patterns:",
+                "      - COD10K-CAM-*",
+                "    include_mask_patterns:",
+                "      - COD10K-CAM-*",
+                "    exclude_image_patterns:",
+                "      - COD10K-NonCAM-*",
+                "    exclude_mask_patterns:",
+                "      - COD10K-NonCAM-*",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "preflight.json"
+    ok, lines = run_preflight(str(config), json_output=str(out))
+    report = json.loads(out.read_text(encoding="utf-8"))["datasets"][0]
+    assert ok
+    assert report["n_images_scanned"] == 2
+    assert report["n_masks_scanned"] == 2
+    assert report["n_images"] == 1
+    assert report["n_masks"] == 1
+    assert report["n_images_excluded"] == 1
+    assert report["n_masks_excluded"] == 1
+    assert report["n_empty_masks"] == 0
+    assert any("file filters excluded images=1 masks=1" in line for line in lines)
+
+
 def test_preflight_reports_loader_type(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
