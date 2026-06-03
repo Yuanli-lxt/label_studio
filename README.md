@@ -92,8 +92,26 @@ python -m image_segmentation.benchmark.run_benchmark \
 Outputs:
 - `predictions.jsonl`: model pre-label masks with Layer 1 quality/review metadata and optional Layer 2 uncertainty.
 - `correction_delta_dataset.jsonl`: model-vs-COCO-GT correction deltas, marked as `public_gt_simulated_human_annotation`.
-- `review_queue.jsonl`: Layer 5 priority queue with delta only in `evaluation_only`.
+- `review_queue.jsonl`: Layer 5 priority queue with delta only in `evaluation_only`. Experimental `shadow_scores` may include boundary/shape, learned-fusion, and gated-fusion scores; these are shadow-only fields and do not affect default priority score, rank, bucket, or review queue sorting.
 - `evaluation_report.json` and `evaluation_report.md`: machine and human-readable metrics.
+
+Shadow-only learned boundary/shape observation is documented in `docs/segmentation_shadow_scoring_rollout.md`. The live runner can process one queue or multiple windows, writes production-mode monitoring with `--no-labels`, verifies default field and ordering equality, aggregates drift/alert status, and exports safe disagreement packets for human review:
+
+```bash
+.venv/bin/python -m image_segmentation.benchmark.live_shadow_rollout \
+  --input-dir <production_queue_dir> \
+  --window-glob "review_queue_*.jsonl" \
+  --output-root demo_data/model_state/image_segmentation/benchmark/production_shadow_expanded_observation \
+  --artifact-dir <artifact_dir> \
+  --enable-learned-boundary-shape-shadow \
+  --production-mode \
+  --no-labels \
+  --max-windows 5
+```
+
+This path is shadow-only: it must not modify default Layer 5 weights, default review queue sorting, or prediction-time feature matrices. Expanded observation writes per-window reports plus `expanded_shadow_multi_window_summary.json/.md` and `production_shadow_expanded_rollout_decision_report.md`. Optional human feedback import is offline analysis only via `image_segmentation.benchmark.summarize_shadow_human_feedback`.
+
+Broader shadow observation uses the same runner with at least 10 windows and writes `production_shadow_broader_observation`, `broader_shadow_multi_window_summary.json/.md`, `human_review_task_packet/`, and `production_shadow_broader_rollout_decision_report.md`. Broader summaries flag p95 drift outliers above `1.0` baseline standard deviations so dataset or queue-mix shifts can be inspected before any promotion discussion.
 
 Report metrics:
 - model/GT IoU, Dice, precision, and recall measure pre-label mask quality against public ground truth.
@@ -1064,6 +1082,94 @@ python -m image_segmentation.benchmark.learn_boundary_shape_fusion \
 ```
 
 The learned fusion compares `current_full_priority`, `risk_only`, `risk_heavy`, `boundary_shape_experimental`, `boundary_shape_rank_score`, `boundary_shape_calibrated_score`, `learned_boundary_shape_only`, and `learned_current_plus_boundary_shape`. Each fold fits scaler/model only on the train fold and predicts the held-out fold. If scikit-learn is unavailable, a numpy logistic fallback is used.
+
+### Boundary/Shape Shadow Scoring
+
+Boundary/shape shadow scoring is a production-adjacent, shadow-only rollout path for prediction-time boundary features and learned boundary/shape artifacts. It is disabled by default in review queue generation. Enabling it adds `shadow_scores` and `shadow_score_metadata` to queue items after default Layer 5 scoring and ordering are complete.
+
+Feature flags:
+
+```bash
+SEGMENTATION_ENABLE_BOUNDARY_SHAPE_SHADOW=false
+SEGMENTATION_ENABLE_LEARNED_BOUNDARY_SHAPE_SHADOW=false
+SEGMENTATION_BOUNDARY_SHAPE_ARTIFACT_DIR=
+SEGMENTATION_BOUNDARY_SHAPE_ARTIFACT_REGISTRY=
+SEGMENTATION_BOUNDARY_SHAPE_ARTIFACT_VERSION=
+SEGMENTATION_BOUNDARY_SHAPE_SHADOW_VERSION=boundary_shape_shadow_v1
+SEGMENTATION_BOUNDARY_SHAPE_FAIL_OPEN=true
+```
+
+Shadow output keeps a stable contract: `shadow_only: true`, `affects_default_ranking: false`, `score_version`, calibrated/rank boundary scores, learned scores when explicitly configured, and artifact metadata including validation status, missing safe feature counts, and inference errors. Shadow scores never update `priority_score`, `rank`, `priority_bucket`, default Layer 5 weights, or the default sorting key.
+
+Learned artifacts can be loaded from an explicit artifact dir or from a registry:
+
+```text
+artifacts/segmentation/boundary_shape/
+  learned_boundary_shape_only_v1/
+    learned_boundary_shape_only_model.pkl
+    learned_current_plus_boundary_shape_model.pkl
+    feature_schema.json
+    model_metadata.json
+    validation_report.json
+  CURRENT
+```
+
+`CURRENT` contains the active version name. Rollback is a config or `CURRENT` switch. Artifact metadata must stay shadow-only and must declare `affects_default_ranking: false`. Feature schemas reject GT-derived or evaluation-only fields such as GT masks/paths, IoU/Dice, boundary metrics, correction deltas, severity/major-correction labels, dataset GT-only metadata, and `boundary_metadata`.
+
+Fail-safe behavior: missing artifact config produces null learned scores with `artifact_validation_status: not_configured`; missing paths, load failures, schema mismatch, or inference errors produce null learned scores and error metadata while the main queue generation continues when `SEGMENTATION_BOUNDARY_SHAPE_FAIL_OPEN=true`. Explicit validation uses `python -m image_segmentation.benchmark.learn_boundary_shape_fusion --validate-artifact ...` or `validate_artifact_for_shadow(...)` and raises on schema/load failures.
+
+Run monitoring:
+
+```bash
+python -m image_segmentation.benchmark.compare_shadow_scores \
+  --review-queue <review_queue.shadow_scored.jsonl> \
+  --output-dir <output_dir>/shadow_monitoring \
+  --window-id <production-window-id> \
+  --baseline <previous_shadow_monitoring.json> \
+  --production-mode \
+  --no-labels
+```
+
+Monitoring writes `shadow_monitoring.json`, `shadow_monitoring.md`, and `shadow_disagreement_examples.jsonl` with coverage, score distributions and drift, current-vs-shadow rank agreement, top-k overlap/Jaccard, disagreement volume/examples, latency fields, alert checks, and safety metadata. Latency includes queue generation latency when supplied, shadow scoring total time, monitoring time, review packet export time, artifact load latency when separable, and per-item p50/p95/p99/mean/max timing; unavailable values remain `null`. Production mode does not read labels or `evaluation_only` fields. Offline label metrics are allowed only outside production mode and are marked `evaluation_only`. Promotion requires real shadow feedback, clean artifact validation, stable cross-dataset agreement, no leakage findings, and an explicit review; this rollout is not a default sorting or weight promotion.
+
+The broader human review task packet exports safe-only JSONL groups: `high_learned_low_current`, `high_current_low_learned`, `top_learned`, and `control_current_top`. Human feedback rows may include `group`, `human_review_outcome`, `reviewer`, `reviewed_at`, and `notes`; the offline summary reports group correction rates, hit rates, learned lift versus control, unclear rate, examples, and inter-reviewer agreement. Human outcomes never enter production scoring or default sorting.
+
+When broader rollout triggers non-hard drift, missing-feature, or top-k alerts, use the offline root-cause tools before expanding further:
+
+```bash
+python -m image_segmentation.benchmark.analyze_shadow_drift --multi-window-root <broader_root> --baseline-window window_001 --windows window_004 window_007 --output-dir <broader_root>/drift_root_cause
+python -m image_segmentation.benchmark.analyze_shadow_missing_features --multi-window-root <broader_root> --windows window_001 window_004 --output-dir <broader_root>/missing_feature_analysis
+python -m image_segmentation.benchmark.analyze_shadow_topk_jaccard --multi-window-root <broader_root> --baseline-window window_001 --windows window_002 window_004 window_005 window_007 --output-dir <broader_root>/topk_jaccard_analysis
+python -m image_segmentation.benchmark.build_shadow_human_review_assignment --task-packet-dir <broader_root>/human_review_task_packet --output-dir <broader_root>/human_review_assignment
+```
+
+These reports use safe fields only. Non-hard alerts block expansion until explained, but they do not require rollback when default fields/order are unchanged, labels are not read, artifact validation is clean, and shadow scores remain isolated.
+
+Replay and review packet:
+
+```bash
+python -m image_segmentation.benchmark.apply_shadow_scores \
+  --review-queue <input_review_queue.jsonl> \
+  --output <output_review_queue.shadow_scored.jsonl> \
+  --artifact-dir <artifact_dir> \
+  --enable-learned-boundary-shape-shadow
+
+python -m image_segmentation.benchmark.export_shadow_review_packet \
+  --review-queue <output_review_queue.shadow_scored.jsonl> \
+  --output-dir <output_dir>/shadow_review_packet \
+  --top-k 50 \
+  --production-mode
+```
+
+Initial alert thresholds: learned null rate above `0.05`, any active artifact status not `valid`, inference error rate above `0.01`, missing safe feature p95 above `0`, queue generation latency regression above `10%`, configured shadow scoring p95 or artifact load latency thresholds, p95 distribution shift above `3` baseline std, top100 Jaccard relative change above `50%`, any `shadow_only != true`, or any `affects_default_ranking != false`.
+
+Before enabling shadow rollout, confirm artifact validation passes, feature flags default off, fail-open behavior is tested, default sorting equality is tested, monitoring works, rollback is tested, and alert thresholds are defined. During rollout, track learned coverage, null rate, load failures, inference errors, distribution drift/outliers, top-k overlap, disagreement volume, human feedback group hit rates, learned lift versus control, and latency overhead. Roll back by disabling learned shadow, disabling boundary/shape shadow, clearing artifact env vars, switching artifact version, changing registry `CURRENT`, or redeploying the previous config. Promotion requires stable live coverage, low null/error rates, no latency regression, no leakage findings, stable distributions, useful human-reviewed disagreement outcomes, and label-backed lift on representative production traffic.
+
+Full runbook: `docs/segmentation_shadow_scoring_rollout.md`.
+
+Schema-aware shadow analysis is available for broader rollout windows. Run `classify_shadow_windows` first, then use `--schema-aware --classification <shadow_window_classification.json>` with `analyze_shadow_drift`, `analyze_shadow_topk_jaccard`, and `analyze_shadow_missing_features`. The schema-aware reports distinguish `stability_alert` from `compatibility_warning`: old schema fallback, mixed schema, and zero same-sample overlap are not treated as default-promotion evidence. Same shadow traffic may resume cautiously only when hard safety alerts are absent; small expansion, broader expansion, default sorting, and Layer 5 weight promotion remain held until comparable-window stability and human feedback support them.
+
+Controlled comparable-window validation starts with `select_comparable_shadow_windows`, then runs the same schema-aware drift/top-k/missing-feature tools against `selected_shadow_window_classification.json`. Use `prepare_controlled_human_review_assignment` to create an offline safe-field-only review package. If controlled full-feature windows still show stability alerts, hold small expansion; if they are stable but feedback is missing, continue only same-scope shadow observation.
 
 ### Three-Way Comparison
 

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import pickle
 import random
+import sys
 from pathlib import Path
 from typing import Any
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -31,6 +34,7 @@ CURRENT_PLUS_FEATURES = [
     "boundary_shape_score",
     "boundary_shape_calibrated_score",
 ]
+ARTIFACT_VERSION = "learned_boundary_shape_shadow_v1"
 
 
 def learn_boundary_shape_fusion(
@@ -128,6 +132,196 @@ def learn_boundary_shape_fusion(
     return report
 
 
+def export_learned_fusion_artifacts(
+    review_queue: str,
+    artifact_dir: str,
+    training_dataset_names: list[str] | None = None,
+    random_seed: int = 42,
+    oof_metrics_reference_path: str | None = None,
+    benchmark_report_reference_path: str | None = None,
+    training_command: str | None = None,
+    validate_review_queue: str | None = None,
+) -> dict:
+    items = _read_jsonl(review_queue)
+    labels = [target_label(item) for item in items]
+    if any(label is None for label in labels):
+        raise ValueError("major_correction label is required for full-data learned fusion artifact training")
+    y = np.asarray([1 if label else 0 for label in labels], dtype=int)
+    if len(set(y.tolist())) < 2:
+        raise ValueError("artifact training requires at least one positive and one negative sample")
+    output = Path(artifact_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    experiments = {
+        "learned_boundary_shape_only": BOUNDARY_FEATURES,
+        "learned_current_plus_boundary_shape": CURRENT_PLUS_FEATURES,
+    }
+    models = {}
+    for name, feature_names in experiments.items():
+        assert_no_leaky_feature_names(feature_names)
+        x = _feature_matrix(items, feature_names)
+        scaler = _fit_scaler(x)
+        model = _fit_model(_apply_scaler(x, scaler), y, int(random_seed))
+        models[name] = {
+            "experiment": name,
+            "feature_names": feature_names,
+            "scaler": _json_scaler(scaler),
+            "model": model,
+            "model_type": _model_type(model),
+        }
+        filename = f"{name}_model.pkl"
+        with (output / filename).open("wb") as f:
+            pickle.dump(models[name], f)
+    feature_schema = {
+        "artifact_version": ARTIFACT_VERSION,
+        "score_version": "learned_boundary_shape_shadow_v1",
+        "experiments": {name: {"feature_names": features} for name, features in experiments.items()},
+        "strict_schema_match": True,
+        "missing_feature_policy": "neutral_zero_fill",
+    }
+    metadata = {
+        "experimental_shadow_only": True,
+        "shadow_only": True,
+        "artifact_version": ARTIFACT_VERSION,
+        "affects_default_ranking": False,
+        "warning": "This artifact is for shadow scoring only and must not change default Layer 5 ordering.",
+        "model_type": sorted({row["model_type"] for row in models.values()}),
+        "training_dataset_names": training_dataset_names or [],
+        "training_sample_count": len(items),
+        "positive_count": int(y.sum()),
+        "feature_names": experiments,
+        "feature_transforms": {
+            "safe_prediction_features": "numeric zero fill; pred_touches_border boolean to 0/1",
+            "scaler": "robust median/IQR with clipping to [-5, 5]",
+            "missing_feature_policy": "neutral_zero_fill",
+        },
+        "excluded_leaky_fields": sorted(
+            [
+                "GT mask",
+                "GT mask path",
+                "IoU",
+                "Dice",
+                "boundary IoU",
+                "boundary F1",
+                "boundary delta",
+                "correction delta",
+                "major correction label",
+                "severity label",
+                "dataset GT-only metadata",
+                "boundary_metadata",
+            ]
+        ),
+        "scaler_type": "robust_median_iqr",
+        "sklearn_version": _sklearn_version(),
+        "torch_version": _torch_version(),
+        "random_seed": int(random_seed),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "training_command": training_command or " ".join(sys.argv),
+        "validation_report_path": str(output / "validation_report.json"),
+        "oof_metrics_reference_path": oof_metrics_reference_path,
+        "benchmark_report_reference_path": benchmark_report_reference_path,
+    }
+    _write_json(output / "feature_schema.json", feature_schema)
+    _write_json(output / "model_metadata.json", metadata)
+    validation = validate_learned_fusion_artifact(str(output), validate_review_queue or review_queue, output_dir=str(output))
+    return {
+        "artifact_dir": str(output),
+        "feature_schema": feature_schema,
+        "model_metadata": metadata,
+        "validation_report": validation,
+        "model_files": [f"{name}_model.pkl" for name in experiments],
+    }
+
+
+def predict_with_artifacts(item: dict, artifact_dir: str) -> dict[str, float | None]:
+    root = Path(artifact_dir)
+    schema = _read_json(root / "feature_schema.json")
+    experiments = schema.get("experiments") if isinstance(schema.get("experiments"), dict) else {}
+    out: dict[str, float | None] = {}
+    for name in ["learned_boundary_shape_only", "learned_current_plus_boundary_shape"]:
+        model_path = root / f"{name}_model.pkl"
+        if not model_path.exists():
+            out[name] = None
+            continue
+        with model_path.open("rb") as f:
+            bundle = pickle.load(f)
+        schema_features = ((experiments.get(name) or {}).get("feature_names") or [])
+        feature_names = bundle.get("feature_names") or []
+        if list(schema_features) != list(feature_names):
+            raise ValueError(f"feature schema mismatch for {name}")
+        assert_no_leaky_feature_names(list(feature_names))
+        x = _feature_matrix([item], list(feature_names))
+        scaler = _scaler_from_json(bundle.get("scaler") or {})
+        probs = _predict_model(bundle.get("model"), _apply_scaler(x, scaler))
+        out[name] = _clip(_num(probs[0])) if len(probs) else None
+    return out
+
+
+def validate_learned_fusion_artifact(artifact_dir: str, review_queue: str, output_dir: str | None = None, max_rows: int = 5) -> dict:
+    root = Path(artifact_dir)
+    queue_items = _read_jsonl(review_queue)
+    schema = _read_json(root / "feature_schema.json")
+    metadata = _read_json(root / "model_metadata.json")
+    checks = {
+        "feature_schema_present": (root / "feature_schema.json").exists(),
+        "model_metadata_present": (root / "model_metadata.json").exists(),
+        "shadow_only": bool(metadata.get("experimental_shadow_only") is True and metadata.get("affects_default_ranking") is False),
+        "missing_feature_policy_explicit": bool(schema.get("missing_feature_policy")),
+        "models_load": True,
+        "feature_schema_match": True,
+        "features_prediction_time_safe": True,
+        "inference_succeeds": True,
+        "score_range_sane": True,
+    }
+    errors = []
+    experiments = schema.get("experiments") if isinstance(schema.get("experiments"), dict) else {}
+    for name in ["learned_boundary_shape_only", "learned_current_plus_boundary_shape"]:
+        try:
+            model_path = root / f"{name}_model.pkl"
+            if not model_path.exists():
+                raise FileNotFoundError(str(model_path))
+            with model_path.open("rb") as f:
+                bundle = pickle.load(f)
+            schema_features = ((experiments.get(name) or {}).get("feature_names") or [])
+            bundle_features = bundle.get("feature_names") or []
+            if list(schema_features) != list(bundle_features):
+                checks["feature_schema_match"] = False
+                errors.append(f"{name}: feature schema mismatch")
+            assert_no_leaky_feature_names(list(bundle_features))
+        except Exception as exc:
+            checks["models_load"] = False
+            checks["features_prediction_time_safe"] = False
+            errors.append(f"{name}: {exc}")
+    scores = []
+    for item in queue_items[: max(0, int(max_rows))]:
+        try:
+            row = predict_with_artifacts(item, artifact_dir)
+            scores.extend(value for value in row.values() if value is not None)
+        except Exception as exc:
+            checks["inference_succeeds"] = False
+            errors.append(f"inference: {exc}")
+            break
+    if any(value < 0.0 or value > 1.0 for value in scores):
+        checks["score_range_sane"] = False
+        errors.append("inference score outside [0, 1]")
+    passed = all(checks.values())
+    report = {
+        "artifact_dir": artifact_dir,
+        "review_queue": review_queue,
+        "artifact_version": metadata.get("artifact_version"),
+        "validation_sample_count": min(len(queue_items), max(0, int(max_rows))),
+        "checks": checks,
+        "errors": errors,
+        "passed": passed,
+    }
+    target = Path(output_dir) if output_dir else root
+    target.mkdir(parents=True, exist_ok=True)
+    _write_json(target / "validation_report.json", report)
+    (target / "validation_report.md").write_text(render_artifact_validation_markdown(report), encoding="utf-8")
+    if not passed:
+        raise ValueError(f"learned fusion artifact validation failed: {errors[:3]}")
+    return report
+
+
 def _baseline_scores(items: list[dict]) -> dict[str, list[float]]:
     out = {"current_full_priority": [_clip(_num(item.get("priority_score"))) for item in items]}
     for name in [
@@ -164,19 +358,39 @@ def _feature_matrix(items: list[dict], feature_names: list[str]) -> np.ndarray:
 
 
 def _fit_predict(x_train: np.ndarray, y_train: np.ndarray, x_eval: np.ndarray, seed: int) -> np.ndarray:
+    model = _fit_model(x_train, y_train, seed)
+    return _predict_model(model, x_eval)
+
+
+def _fit_model(x_train: np.ndarray, y_train: np.ndarray, seed: int) -> Any:
     try:
         from sklearn.linear_model import LogisticRegression
 
         model = LogisticRegression(C=0.5, max_iter=1000, random_state=seed)
         model.fit(x_train, y_train)
-        return model.predict_proba(x_eval)[:, 1]
+        return model
     except Exception:
-        return _numpy_logistic_predict(x_train, y_train, x_eval)
+        return {"type": "numpy_logistic_regression", "weights": _numpy_logistic_weights(x_train, y_train).tolist()}
+
+
+def _predict_model(model: Any, x_eval: np.ndarray) -> np.ndarray:
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(x_eval)[:, 1]
+    if isinstance(model, dict) and model.get("type") == "numpy_logistic_regression":
+        weights = np.asarray(model.get("weights") or [], dtype=float)
+        x_eval_bias = np.c_[np.ones(len(x_eval)), x_eval]
+        return 1.0 / (1.0 + np.exp(-np.clip(x_eval_bias @ weights, -30, 30)))
+    raise ValueError("unsupported learned fusion model artifact")
 
 
 def _numpy_logistic_predict(x_train: np.ndarray, y_train: np.ndarray, x_eval: np.ndarray) -> np.ndarray:
-    x = np.c_[np.ones(len(x_train)), x_train]
+    weights = _numpy_logistic_weights(x_train, y_train)
     x_eval_bias = np.c_[np.ones(len(x_eval)), x_eval]
+    return 1.0 / (1.0 + np.exp(-np.clip(x_eval_bias @ weights, -30, 30)))
+
+
+def _numpy_logistic_weights(x_train: np.ndarray, y_train: np.ndarray) -> np.ndarray:
+    x = np.c_[np.ones(len(x_train)), x_train]
     weights = np.zeros(x.shape[1], dtype=float)
     lr = 0.1
     reg = 0.05
@@ -185,7 +399,7 @@ def _numpy_logistic_predict(x_train: np.ndarray, y_train: np.ndarray, x_eval: np
         grad = (x.T @ (pred - y_train)) / max(1, len(y_train))
         grad[1:] += reg * weights[1:]
         weights -= lr * grad
-    return 1.0 / (1.0 + np.exp(-np.clip(x_eval_bias @ weights, -30, 30)))
+    return weights
 
 
 def _fit_scaler(x: np.ndarray) -> dict:
@@ -199,6 +413,20 @@ def _fit_scaler(x: np.ndarray) -> dict:
 
 def _apply_scaler(x: np.ndarray, scaler: dict) -> np.ndarray:
     return np.clip((x - scaler["median"]) / scaler["scale"], -5.0, 5.0)
+
+
+def _json_scaler(scaler: dict) -> dict:
+    return {
+        "median": np.asarray(scaler["median"], dtype=float).tolist(),
+        "scale": np.asarray(scaler["scale"], dtype=float).tolist(),
+    }
+
+
+def _scaler_from_json(scaler: dict) -> dict:
+    return {
+        "median": np.asarray(scaler.get("median") or [], dtype=float),
+        "scale": np.asarray(scaler.get("scale") or [], dtype=float),
+    }
 
 
 def _metrics(labels: list[int], scores: list[float]) -> dict:
@@ -369,6 +597,26 @@ def render_bootstrap_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
+def render_artifact_validation_markdown(report: dict) -> str:
+    lines = [
+        "# Learned Fusion Artifact Validation",
+        "",
+        f"- artifact_dir: {report.get('artifact_dir')}",
+        f"- artifact_version: {report.get('artifact_version')}",
+        f"- review_queue: {report.get('review_queue')}",
+        f"- passed: {report.get('passed')}",
+        "",
+        "| check | passed |",
+        "| --- | --- |",
+    ]
+    for name, passed in (report.get("checks") or {}).items():
+        lines.append(f"| {name} | {passed} |")
+    errors = report.get("errors") or []
+    if errors:
+        lines.extend(["", "## Errors", *(f"- {error}" for error in errors)])
+    return "\n".join(lines)
+
+
 def _stratified_fold_indices(labels: list[int], n_splits: int, random_seed: int) -> list[list[int]]:
     pos = [idx for idx, value in enumerate(labels) if value]
     neg = [idx for idx, value in enumerate(labels) if not value]
@@ -418,6 +666,32 @@ def _sklearn_available() -> bool:
         return False
 
 
+def _sklearn_version() -> str | None:
+    try:
+        import sklearn
+
+        return str(sklearn.__version__)
+    except Exception:
+        return None
+
+
+def _torch_version() -> str | None:
+    try:
+        import torch
+
+        return str(torch.__version__)
+    except Exception:
+        return None
+
+
+def _model_type(model: Any) -> str:
+    if hasattr(model, "predict_proba"):
+        return "sklearn_logistic_regression"
+    if isinstance(model, dict):
+        return str(model.get("type") or "unknown")
+    return type(model).__name__
+
+
 def _row_id(row: dict, fallback: int) -> str:
     return str(row.get("task_id") or row.get("sample_id") or row.get("prediction_id") or fallback)
 
@@ -431,6 +705,10 @@ def _percentile(values: list[float], percentile: float) -> float | None:
 def _read_jsonl(path: str) -> list[dict]:
     with Path(path).open("r", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def _read_json(path: str | Path) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -461,16 +739,31 @@ def _fmt(value: Any) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run leakage-safe OOF learned boundary/shape fusion.")
-    parser.add_argument("--review-queue", required=True)
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--review-queue")
+    parser.add_argument("--output-dir")
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--bootstrap", type=int, default=0)
+    parser.add_argument("--artifact-dir")
+    parser.add_argument("--export-artifact")
+    parser.add_argument("--training-dataset-name", action="append", default=[])
+    parser.add_argument("--oof-metrics-reference-path")
+    parser.add_argument("--benchmark-report-reference-path")
+    parser.add_argument("--validate-artifact")
+    parser.add_argument("--validation-output-dir")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.validate_artifact:
+        if not args.review_queue:
+            raise SystemExit("--review-queue is required with --validate-artifact")
+        report = validate_learned_fusion_artifact(args.validate_artifact, args.review_queue, output_dir=args.validation_output_dir)
+        print(f"[OK] artifact validation passed={report['passed']} artifact_dir={args.validate_artifact}")
+        return 0
+    if not args.review_queue or not args.output_dir:
+        raise SystemExit("--review-queue and --output-dir are required unless --validate-artifact is used")
     result = learn_boundary_shape_fusion(
         args.review_queue,
         args.output_dir,
@@ -478,6 +771,16 @@ def main(argv: list[str] | None = None) -> int:
         random_seed=args.random_seed,
         bootstrap_iters=args.bootstrap,
     )
+    artifact_dir = args.export_artifact or args.artifact_dir
+    if artifact_dir:
+        export_learned_fusion_artifacts(
+            args.review_queue,
+            artifact_dir,
+            training_dataset_names=args.training_dataset_name,
+            random_seed=args.random_seed,
+            oof_metrics_reference_path=args.oof_metrics_reference_path or str(Path(args.output_dir) / "learned_fusion_results.json"),
+            benchmark_report_reference_path=args.benchmark_report_reference_path,
+        )
     print(f"[OK] learned boundary fusion samples={result['n_samples']} folds={result['n_splits']} output_dir={args.output_dir}")
     return 0
 

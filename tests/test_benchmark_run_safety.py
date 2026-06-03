@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from image_segmentation.benchmark.evaluation import build_evaluation_report
-from image_segmentation.benchmark.run_benchmark import _minimal_rle, run_benchmark
+from image_segmentation.benchmark.run_benchmark import _enforce_device_contract, _minimal_rle, run_benchmark
 from segmentation_uncertainty import generate_bbox_prompt_variants
 
 
@@ -137,6 +137,34 @@ class BenchmarkRunSafetyTests(unittest.TestCase):
             self.assertEqual("bbox_rect", row["backend_resolved"])
             self.assertEqual("bbox-rect-benchmark-baseline", row["prediction_source"])
             self.assertEqual("benchmark-bbox-rect-v1", row["model_version"])
+
+    def test_require_gpu_fails_fast_when_cuda_unavailable(self):
+        with self.assertRaisesRegex(RuntimeError, "CUDA is unavailable|refusing CPU fallback"):
+            _enforce_device_contract(
+                {"requested_device": "cuda", "resolved_device": None, "cuda_available": False},
+                require_gpu=True,
+                allow_cpu_fallback=False,
+            )
+
+    def test_device_metadata_records_requested_resolved_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = write_manifest(root)
+            out = root / "out"
+            run_benchmark(str(manifest), str(out), backend="bbox_rect", device="cpu")
+            runtime = json.loads((out / "runtime_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual("cpu", runtime["requested_device"])
+            self.assertEqual("cpu", runtime["resolved_device"])
+            self.assertFalse(runtime["cpu_fallback"])
+            self.assertIn("seconds_per_sample", runtime)
+
+    def test_cpu_fallback_flag_for_cuda_without_resolved_cuda(self):
+        with self.assertRaisesRegex(RuntimeError, "CPU|fallback|CUDA"):
+            _enforce_device_contract(
+                {"requested_device": "cuda", "resolved_device": None, "cuda_available": False},
+                require_gpu=False,
+                allow_cpu_fallback=False,
+            )
 
     def test_prompt_box_within_image_bounds(self):
         with tempfile.TemporaryDirectory() as tmp:

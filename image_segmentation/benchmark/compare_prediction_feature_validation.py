@@ -38,6 +38,14 @@ LEARNED_EXPERIMENTS = [
     "learned_current_plus_boundary_shape",
 ]
 
+GATED_EXPERIMENTS = [
+    "current_full_priority",
+    "boundary_shape_calibrated_score",
+    "boundary_shape_rank_score",
+    "gated_boundary_shape_score",
+    "gated_current_boundary_score",
+]
+
 
 def compare_prediction_feature_validation(runs: list[str], output: str) -> dict:
     bundles = [_parse_run(spec) for spec in runs]
@@ -54,20 +62,36 @@ def render_markdown(runs: list[dict], recommendation: str) -> str:
         "# Cross-Dataset Prediction-Feature Boundary/Shape Validation",
         "",
         "## Dataset Summary",
-        "| dataset | samples | positives | positive rate | mean IoU | median IoU | Dice | major rate | raw features complete |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| dataset | samples | positives | positive rate | mean IoU | median IoU | Dice | major rate | raw features complete | shadow scores complete |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for run in runs:
         q = run["quality"]
         lines.append(
             f"| {run['name']} | {_fmt(q.get('samples'), 0)} | {_fmt(run['diagnostics'].get('positive_count'), 0)} | "
             f"{_fmt(q.get('major_correction_rate'))} | {_fmt(q.get('mean_iou'))} | {_fmt(q.get('median_iou'))} | "
-            f"{_fmt(q.get('dice'))} | {_fmt(q.get('major_correction_rate'))} | {_bool(run['raw_features_complete'])} |"
+            f"{_fmt(q.get('dice'))} | {_fmt(q.get('major_correction_rate'))} | {_bool(run['raw_features_complete'])} | {_bool(run['shadow_scores_complete'])} |"
         )
     lines.extend(["", "## Strongest Features"])
     for run in runs:
         lines.append(f"### {run['name']}")
         lines.extend(_feature_lines(run))
+    lines.extend(
+        [
+            "",
+            "## GPU Runtime Summary",
+            "| dataset | requested | resolved | CPU fallback | CUDA device | sec/sample | peak allocated MB | peak reserved MB |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for run in runs:
+        runtime = run.get("runtime") or {}
+        lines.append(
+            f"| {run['name']} | {runtime.get('requested_device') or 'n/a'} | {runtime.get('resolved_device') or 'n/a'} | "
+            f"{runtime.get('cpu_fallback')} | {runtime.get('cuda_device_name') or 'n/a'} | {_fmt(runtime.get('seconds_per_sample') or runtime.get('seconds_per_sample_mean'))} | "
+            f"{_fmt(runtime.get('peak_cuda_allocated_mb') or runtime.get('peak_cuda_memory_allocated_mb'))} | "
+            f"{_fmt(runtime.get('peak_cuda_reserved_mb') or runtime.get('peak_cuda_memory_reserved_mb'))} |"
+        )
     lines.extend(
         [
             "",
@@ -124,12 +148,66 @@ def render_markdown(runs: list[dict], recommendation: str) -> str:
         comparison = f"{experiment}_vs_current_full_priority"
         for metric in ["average_precision", "roc_auc", "brier", "lift_at_20", "precision_at_20"]:
             lines.append("| " + comparison + " | " + metric + " | " + " | ".join(_fmt_delta_ci(_learned_delta_ci(run, comparison, metric)) for run in runs) + " |")
+    lines.extend(
+        [
+            "",
+            "## Gated Fusion OOF",
+            "| experiment | metric | " + " | ".join(run["name"] for run in runs) + " |",
+            "| --- | --- | " + " | ".join(["---"] * len(runs)) + " |",
+        ]
+    )
+    for experiment in GATED_EXPERIMENTS:
+        for metric in ["average_precision", "roc_auc", "brier", "lift_at_20", "precision_at_20"]:
+            lines.append("| " + experiment + " | " + metric + " | " + " | ".join(_fmt_ci(_gated_metric(run, experiment, metric), _gated_ci(run, experiment, metric)) for run in runs) + " |")
+    lines.extend(
+        [
+            "",
+            "## Gated Delta Vs Current",
+            "| comparison | metric | " + " | ".join(run["name"] for run in runs) + " |",
+            "| --- | --- | " + " | ".join(["---"] * len(runs)) + " |",
+        ]
+    )
+    for experiment in [name for name in GATED_EXPERIMENTS if name != "current_full_priority"]:
+        comparison = f"{experiment}_vs_current_full_priority"
+        for metric in ["average_precision", "roc_auc", "brier", "lift_at_20", "precision_at_20"]:
+            lines.append("| " + comparison + " | " + metric + " | " + " | ".join(_fmt_delta_ci(_gated_delta_ci(run, comparison, metric)) for run in runs) + " |")
+    lines.extend(
+        [
+            "",
+            "## Gate Behavior By Dataset",
+            "| dataset | min | p25 | median | p75 | max | high-gate n | high-gate major rate |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for run in runs:
+        overall = (((run.get("gated") or {}).get("gate_distribution") or {}).get("overall") or {})
+        lines.append(
+            f"| {run['name']} | {_fmt(overall.get('min'))} | {_fmt(overall.get('p25'))} | {_fmt(overall.get('median'))} | "
+            f"{_fmt(overall.get('p75'))} | {_fmt(overall.get('max'))} | {_fmt(overall.get('high_gate_sample_count'), 0)} | {_fmt(overall.get('high_gate_major_rate'))} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Shadow Monitoring",
+            "| dataset | learned boundary non-null | learned boundary top20 overlap | learned boundary AP | artifact validation |",
+            "| --- | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for run in runs:
+        monitoring = run.get("shadow_monitoring") or {}
+        field = ((monitoring.get("fields") or {}).get("learned_boundary_shape_only_score") or {})
+        lines.append(
+            f"| {run['name']} | {_fmt(field.get('non_null_count'), 0)} | "
+            f"{_fmt((((field.get('topk_overlap') or {}).get('k20') or {}).get('jaccard')))} | "
+            f"{_fmt(((field.get('offline_label_metrics') or {}).get('average_precision')))} | "
+            f"{_artifact_validation_status(run)} |"
+        )
     lines.extend(["", "## Winners"])
     for run in runs:
         lines.append(
             f"- {run['name']}: best AP preset={_best_preset(run, 'average_precision_for_major_correction')}; "
             f"best lift@20 preset={_best_preset(run, 'lift_at_20_percent_over_random')}; "
-            f"best OOF learned AP={_best_learned(run)}"
+            f"best OOF learned AP={_best_learned(run)}; best gated AP={_best_gated(run)}"
         )
     lines.extend(
         [
@@ -142,6 +220,11 @@ def render_markdown(runs: list[dict], recommendation: str) -> str:
             "## Recommendation",
             f"- {recommendation}",
             "",
+            "## Promotion Criteria Checklist",
+            "- OOF: required for learned/gated candidates.",
+            "- No leakage: GT masks, GT paths, IoU/Dice, boundary deltas, correction deltas, severity labels, major-correction labels, and boundary metadata remain excluded from scoring features.",
+            "- Shadow-only: these scores do not change default review queue ordering.",
+            "- Promotion target: production-adjacent shadow or feature-flag only; do not change default Layer 5 weights from this report.",
         ]
     )
     return "\n".join(lines)
@@ -166,9 +249,13 @@ def _parse_run(spec: str) -> dict:
         "diagnostics": diagnostics,
         "ablation": ablation,
         "learned": learned,
+        "runtime": _read_json(Path(report_path).parent / "runtime_metadata.json") if (Path(report_path).parent / "runtime_metadata.json").exists() else {},
         "ablation_ci": _read_json(ablation_ci_path) if ablation_ci_path else None,
         "learned_ci": _read_json(learned_ci_path) if learned_ci_path else None,
+        "gated": {},
+        "gated_ci": None,
         "raw_features_complete": _raw_features_complete(diagnostics),
+        "shadow_scores_complete": _shadow_scores_complete(report_path),
         "paths": {
             "report": report_path,
             "diagnostics": diagnostics_path,
@@ -197,7 +284,43 @@ def _parse_run_dir(spec: str) -> dict:
             "learned_boundary_shape_fusion.json",
         ],
     )
-    return _parse_run(":".join([name, str(report_path), str(diagnostics_path), str(ablation_path), str(learned_path)]))
+    parsed = _parse_run(":".join([name, str(report_path), str(diagnostics_path), str(ablation_path), str(learned_path)]))
+    gated_path = _optional_first_existing(
+        root,
+        [
+            "gated_fusion/gated_fusion_results.json",
+            "gated_fusion/gated_boundary_shape_fusion.json",
+            "gated_fusion_results.json",
+            "gated_boundary_shape_fusion.json",
+        ],
+    )
+    if gated_path:
+        parsed["gated"] = _read_json(gated_path)
+        gated_ci_path = _sibling_if_exists(gated_path, "gated_fusion_bootstrap_ci.json")
+        parsed["gated_ci"] = _read_json(gated_ci_path) if gated_ci_path else None
+        parsed["paths"]["gated"] = str(gated_path)
+        parsed["paths"]["gated_ci"] = gated_ci_path
+    monitoring_path = _optional_first_existing(
+        root,
+        [
+            "shadow_monitoring/shadow_monitoring.json",
+            "shadow_monitoring.json",
+        ],
+    )
+    if monitoring_path:
+        parsed["shadow_monitoring"] = _read_json(monitoring_path)
+        parsed["paths"]["shadow_monitoring"] = str(monitoring_path)
+    validation_path = _optional_first_existing(
+        root,
+        [
+            "learned_fusion_artifacts/validation_report.json",
+            "validation_report.json",
+        ],
+    )
+    if validation_path:
+        parsed["artifact_validation"] = _read_json(validation_path)
+        parsed["paths"]["artifact_validation"] = str(validation_path)
+    return parsed
 
 
 def _first_existing(root: Path, candidates: list[str]) -> Path:
@@ -209,6 +332,13 @@ def _first_existing(root: Path, candidates: list[str]) -> Path:
         if matches:
             return matches[0]
     raise ValueError(f"could not find any of {candidates} under {root}")
+
+
+def _optional_first_existing(root: Path, candidates: list[str]) -> Path | None:
+    try:
+        return _first_existing(root, candidates)
+    except ValueError:
+        return None
 
 
 def _sibling_if_exists(path: str | Path, filename: str) -> str | None:
@@ -292,6 +422,18 @@ def _learned_delta_ci(run: dict, comparison: str, metric: str) -> dict | None:
     return ((((run.get("learned_ci") or {}).get("pairwise_delta_vs_current") or {}).get(comparison) or {}).get(metric))
 
 
+def _gated_metric(run: dict, experiment: str, metric: str) -> Any:
+    return (((run.get("gated") or {}).get("experiments") or {}).get(experiment) or {}).get(metric)
+
+
+def _gated_ci(run: dict, experiment: str, metric: str) -> dict | None:
+    return ((((run.get("gated_ci") or {}).get("experiments") or {}).get(experiment) or {}).get(metric))
+
+
+def _gated_delta_ci(run: dict, comparison: str, metric: str) -> dict | None:
+    return ((((run.get("gated_ci") or {}).get("pairwise_delta_vs_current") or {}).get(comparison) or {}).get(metric))
+
+
 def _best_preset(run: dict, metric: str) -> str:
     presets = (run.get("ablation") or {}).get("presets") or {}
     if not presets:
@@ -308,6 +450,40 @@ def _best_learned(run: dict) -> str:
     if not rows:
         return "n/a"
     return max(rows, key=lambda name: _num((rows.get(name) or {}).get("average_precision")))
+
+
+def _best_gated(run: dict) -> str:
+    rows = (run.get("gated") or {}).get("experiments") or {}
+    if not rows:
+        return "n/a"
+    return max(rows, key=lambda name: _num((rows.get(name) or {}).get("average_precision")))
+
+
+def _artifact_validation_status(run: dict) -> str:
+    report = run.get("artifact_validation") or {}
+    if not report:
+        return "n/a"
+    return "passed" if report.get("passed") is True else "failed"
+
+
+def _shadow_scores_complete(report_path: str | Path) -> bool:
+    queue = Path(report_path).parent / "review_queue.jsonl"
+    if not queue.exists():
+        return False
+    rows = [json.loads(line) for line in queue.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not rows:
+        return False
+    required = [
+        "boundary_shape_calibrated_score",
+        "boundary_shape_rank_score",
+        "gated_boundary_shape_score",
+        "gated_current_boundary_score",
+    ]
+    for row in rows:
+        shadow = row.get("shadow_scores") if isinstance(row.get("shadow_scores"), dict) else {}
+        if any(shadow.get(name) is None for name in required):
+            return False
+    return True
 
 
 def _recommendation(runs: list[dict]) -> str:

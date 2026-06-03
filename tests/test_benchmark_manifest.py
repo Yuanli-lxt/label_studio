@@ -110,6 +110,25 @@ class BenchmarkManifestTests(unittest.TestCase):
     def test_coco300_config_exists(self):
         self.assertTrue(Path("configs/benchmark_v0_1.coco300.yaml").exists())
 
+    def test_cod10k500_config_filters_noncam(self):
+        import yaml
+
+        config = yaml.safe_load(Path("configs/benchmark_v0_1.cod10k500.yaml").read_text(encoding="utf-8"))
+        dataset = config["datasets"]["cod10k"]
+        self.assertEqual(500, config["max_samples_total"])
+        self.assertEqual(500, dataset["max_samples"])
+        self.assertIn("COD10K-CAM-*", dataset["include_image_patterns"])
+        self.assertIn("COD10K-NonCAM-*", dataset["exclude_image_patterns"])
+
+    def test_dis5k500_config_uses_500_pairs(self):
+        import yaml
+
+        config = yaml.safe_load(Path("configs/benchmark_v0_1.dis5k500.yaml").read_text(encoding="utf-8"))
+        dataset = config["datasets"]["dis5k"]
+        self.assertEqual(500, config["max_samples_total"])
+        self.assertEqual(500, dataset["max_samples"])
+        self.assertEqual("same_stem", dataset["mask_match_strategy"])
+
     def test_manifest_respects_max_samples_total(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -7,6 +7,7 @@ import os
 import statistics
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 import numpy as np
 
 from image_segmentation.benchmark.datasets.coco import segmentation_to_mask
+from image_segmentation.benchmark.config import load_config
 from image_segmentation.benchmark.evaluation import build_evaluation_report, render_markdown_report
 from image_segmentation.benchmark.metrics import boundary_metrics, mask_bbox, prediction_time_boundary_shape_features
 from image_segmentation.benchmark.schema import clip_xyxy
@@ -48,10 +50,19 @@ def run_benchmark(
     risk_model_dir: str | None = None,
     max_samples: int | None = None,
     resume: bool = False,
+    device: str | None = None,
+    require_gpu: bool = False,
+    allow_cpu_fallback: bool = False,
 ) -> dict:
     started = time.monotonic()
     started_at = _now_iso()
+    previous_device = os.environ.get("IMAGE_SEG_DEVICE")
+    if device:
+        os.environ["IMAGE_SEG_DEVICE"] = str(device)
     backend_info = resolve_backend(backend)
+    device_info = _runtime_device_info(device or os.getenv("IMAGE_SEG_DEVICE", "cpu"))
+    _enforce_device_contract(device_info, require_gpu=require_gpu, allow_cpu_fallback=allow_cpu_fallback)
+    _reset_cuda_peak_memory()
     rows = _read_jsonl(manifest_path)
     if max_samples is not None:
         rows = rows[: max(0, int(max_samples))]
@@ -65,7 +76,6 @@ def run_benchmark(
         if backend_info["uses_ml_app"] and missing_rows
         else None
     )
-    device_info = _runtime_device_info()
     if (
         backend_info["backend_resolved"] in SAM_BACKENDS
         and str(device_info.get("requested_device") or "").lower() == "cuda"
@@ -133,6 +143,8 @@ def run_benchmark(
         per_image_seconds,
         resume,
         resumed_existing_predictions,
+        require_gpu,
+        allow_cpu_fallback,
     )
     report["backend"] = {
         "backend_requested": backend_info["backend_requested"],
@@ -145,7 +157,7 @@ def run_benchmark(
     _write_json(output / "evaluation_report.json", report)
     _write_json(output / "runtime_metadata.json", runtime)
     (output / "evaluation_report.md").write_text(render_markdown_report(report), encoding="utf-8")
-    return {
+    summary = {
         "output_dir": str(output),
         "n_samples": len(rows),
         "predictions_path": str(predictions_path),
@@ -155,6 +167,12 @@ def run_benchmark(
         "runtime_metadata_path": str(output / "runtime_metadata.json"),
         "warnings": resume_warnings,
     }
+    if device:
+        if previous_device is None:
+            os.environ.pop("IMAGE_SEG_DEVICE", None)
+        else:
+            os.environ["IMAGE_SEG_DEVICE"] = previous_device
+    return summary
 
 
 def _rows_from_prediction(
@@ -736,16 +754,27 @@ def _runtime_metadata(
     per_image_seconds: dict[str, list[float]],
     resume_enabled: bool,
     resumed_existing_predictions: int,
+    require_gpu: bool = False,
+    allow_cpu_fallback: bool = False,
 ) -> dict:
     elapsed = time.monotonic() - started
     image_totals = [sum(values) for values in per_image_seconds.values()]
     peak = _cuda_peak_memory_mb()
+    cpu_fallback = bool(
+        str(device_info.get("requested_device") or "").lower() == "cuda"
+        and str(device_info.get("resolved_device") or "").lower() != "cuda"
+    )
+    mean_sample = statistics.mean(sample_seconds) if sample_seconds else None
     return {
         "backend_requested": backend_info["backend_requested"],
         "backend_resolved": backend_info["backend_resolved"],
         "requested_device": device_info.get("requested_device"),
         "resolved_device": device_info.get("resolved_device"),
+        "require_gpu": bool(require_gpu),
+        "allow_cpu_fallback": bool(allow_cpu_fallback),
+        "cpu_fallback": cpu_fallback,
         "cuda_available": device_info.get("cuda_available"),
+        "cuda_device_count": device_info.get("cuda_device_count"),
         "cuda_device_name": device_info.get("cuda_device_name"),
         "n_samples_requested": len(requested_rows),
         "n_samples_completed": len(completed_rows),
@@ -753,28 +782,46 @@ def _runtime_metadata(
         "started_at": started_at,
         "finished_at": _now_iso(),
         "elapsed_seconds": elapsed,
-        "seconds_per_sample_mean": statistics.mean(sample_seconds) if sample_seconds else None,
+        "seconds_per_sample": mean_sample,
+        "seconds_per_sample_mean": mean_sample,
         "seconds_per_sample_median": statistics.median(sample_seconds) if sample_seconds else None,
         "seconds_per_image_mean": statistics.mean(image_totals) if image_totals else None,
         "resume_enabled": bool(resume_enabled),
         "resumed_existing_predictions": int(resumed_existing_predictions),
+        "peak_allocated_cuda_memory_mb": peak.get("allocated_mb") if peak else None,
+        "peak_reserved_cuda_memory_mb": peak.get("reserved_mb") if peak else None,
+        "peak_cuda_allocated_mb": peak.get("allocated_mb") if peak else None,
+        "peak_cuda_reserved_mb": peak.get("reserved_mb") if peak else None,
         "peak_cuda_memory_allocated_mb": peak.get("allocated_mb") if peak else None,
         "peak_cuda_memory_reserved_mb": peak.get("reserved_mb") if peak else None,
+        "prediction_source_counts": dict(
+            sorted(
+                Counter(str(row.get("prediction_source") or "unknown") for row in completed_rows).items()
+            )
+        ),
+        "fallback_prediction_count": sum(
+            1
+            for row in completed_rows
+            if str(row.get("prediction_source") or "").startswith("placeholder")
+            or (((row.get("prediction") or {}).get("confidence") or {}).get("fallback") is True if isinstance(row.get("prediction"), dict) else False)
+        ),
     }
 
 
-def _runtime_device_info() -> dict:
-    requested = os.getenv("IMAGE_SEG_DEVICE", "cpu").strip() or "cpu"
+def _runtime_device_info(requested_device: str | None = None) -> dict:
+    requested = (requested_device or os.getenv("IMAGE_SEG_DEVICE", "cpu")).strip() or "cpu"
     info = {
         "requested_device": requested,
         "resolved_device": requested,
         "cuda_available": None,
+        "cuda_device_count": None,
         "cuda_device_name": None,
     }
     try:
         import torch
 
         info["cuda_available"] = bool(torch.cuda.is_available())
+        info["cuda_device_count"] = int(torch.cuda.device_count())
         if requested.lower() == "cuda":
             if not info["cuda_available"]:
                 info["resolved_device"] = None
@@ -786,6 +833,27 @@ def _runtime_device_info() -> dict:
         if requested.lower() == "cuda":
             info["resolved_device"] = None
     return info
+
+
+def _enforce_device_contract(device_info: dict, require_gpu: bool = False, allow_cpu_fallback: bool = False) -> None:
+    requested = str(device_info.get("requested_device") or "").lower()
+    resolved = str(device_info.get("resolved_device") or "").lower()
+    if require_gpu and requested != "cuda":
+        raise RuntimeError("--require-gpu requires --device cuda")
+    if require_gpu and resolved != "cuda":
+        raise RuntimeError("--require-gpu was set, but CUDA is unavailable; refusing CPU fallback")
+    if requested == "cuda" and resolved != "cuda" and not allow_cpu_fallback:
+        raise RuntimeError("--device cuda requested, but CUDA is unavailable; pass --allow-cpu-fallback to run on CPU")
+
+
+def _reset_cuda_peak_memory() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(torch.cuda.current_device())
+    except Exception:
+        return
 
 
 def _cuda_memory_mb() -> dict | None:
@@ -829,13 +897,17 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Benchmark v0.1 on a manifest.")
-    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--config")
+    parser.add_argument("--manifest")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--backend", required=True, choices=BACKEND_CHOICES)
+    parser.add_argument("--backend", choices=BACKEND_CHOICES)
     parser.add_argument("--enable-prompt-stability", default="false")
     parser.add_argument("--risk-model-dir")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--resume", default="false")
+    parser.add_argument("--device", choices=["cpu", "cuda"], default=None)
+    parser.add_argument("--require-gpu", action="store_true")
+    parser.add_argument("--allow-cpu-fallback", action="store_true")
     return parser
 
 
@@ -843,15 +915,31 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     enabled = str(args.enable_prompt_stability).strip().lower() in {"1", "true", "yes", "on"}
     resume = str(args.resume).strip().lower() in {"1", "true", "yes", "on"}
+    manifest = args.manifest
+    backend = args.backend
+    if args.config:
+        config = load_config(args.config)
+        benchmark_id = str(config.get("benchmark_id") or Path(args.config).stem)
+        manifest = manifest or str(ROOT / "demo_data" / "model_state" / "image_segmentation" / "benchmark" / f"{benchmark_id}_manifest.jsonl")
+        backend = backend or str(config.get("backend") or "mobile_sam")
+    if not manifest:
+        print("[ERROR] --manifest is required unless --config is supplied")
+        return 1
+    if not backend:
+        print("[ERROR] --backend is required unless --config is supplied")
+        return 1
     try:
         summary = run_benchmark(
-            args.manifest,
+            manifest,
             args.output_dir,
-            backend=args.backend,
+            backend=backend,
             enable_prompt_stability=enabled,
             risk_model_dir=args.risk_model_dir,
             max_samples=args.max_samples,
             resume=resume,
+            device=args.device,
+            require_gpu=args.require_gpu,
+            allow_cpu_fallback=args.allow_cpu_fallback,
         )
     except Exception as exc:
         print(f"[ERROR] {exc}")

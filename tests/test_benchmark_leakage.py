@@ -16,6 +16,7 @@ from segmentation_review_queue import score_review_candidate  # noqa: E402
 from image_segmentation.benchmark import sampling  # noqa: E402
 from image_segmentation.benchmark.learn_boundary_shape_fusion import BOUNDARY_FEATURES, CURRENT_PLUS_FEATURES  # noqa: E402
 from image_segmentation.benchmark.prediction_feature_scoring import assert_no_leaky_feature_names  # noqa: E402
+from image_segmentation.benchmark.shadow_scoring import shadow_scores_for_item  # noqa: E402
 
 
 LEAKY_TOKENS = {
@@ -99,6 +100,13 @@ class BenchmarkLeakageTests(unittest.TestCase):
         self.assertEqual(first["score_components"], second["score_components"])
         self.assertNotIn("boundary_metadata", first["source_metadata"])
         self.assertNotIn("boundary_metadata", second["source_metadata"])
+
+    def test_shadow_scores_ignore_gt_only_fields(self):
+        first = score_review_candidate(candidate(False))
+        changed = score_review_candidate(candidate(True))
+        changed["boundary_metadata"] = {"perimeter_area_ratio": 999.0}
+        changed["evaluation_only"]["delta"]["boundary"] = {"boundary_f1": 0.0}
+        self.assertEqual(shadow_scores_for_item(first), shadow_scores_for_item(changed))
 
     def test_learned_boundary_feature_sets_reject_gt_derived_fields(self):
         assert_no_leaky_feature_names(BOUNDARY_FEATURES)

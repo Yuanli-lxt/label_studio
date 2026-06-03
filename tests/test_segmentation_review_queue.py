@@ -1,8 +1,10 @@
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +115,8 @@ class SegmentationReviewQueueTests(unittest.TestCase):
         self.assertIn("prediction_features", item)
         self.assertIn("mask_quality", item)
         self.assertIn("source_metadata", item)
+        self.assertNotIn("shadow_scores", item)
+        self.assertNotIn("shadow_score_metadata", item)
 
     def test_missing_uncertainty_is_deterministic(self):
         item = self.module.score_review_candidate(candidate(risk=0.1, uncertainty=False))
@@ -182,6 +186,7 @@ class SegmentationReviewQueueTests(unittest.TestCase):
             scores = [item["priority_score"] for item in items]
             self.assertEqual(scores, sorted(scores, reverse=True))
             self.assertEqual([1, 2, 3], [item["rank"] for item in items])
+            self.assertTrue(all("shadow_scores" not in item for item in items))
             self.assertTrue(output.exists())
             written = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([1, 2, 3], [item["rank"] for item in written])
@@ -217,6 +222,70 @@ class SegmentationReviewQueueTests(unittest.TestCase):
         item = self.module.score_review_candidate(candidate(risk=0.5))
         self.assertEqual(self.module.DEFAULT_SCORE_WEIGHTS.keys(), item["review_weight_weights"].keys())
         self.assertEqual("current", item["review_weight_preset"])
+
+    def test_shadow_scores_do_not_affect_priority_score(self):
+        base = candidate(risk=0.5)
+        item = self.module.score_review_candidate(base, enable_shadow_scoring=True)
+        before = item["priority_score"]
+        self.assertIn("boundary_shape_calibrated_score", item["shadow_scores"])
+        self.assertIsNone(item["shadow_scores"]["gated_boundary_shape_score"])
+        self.assertEqual(before, item["priority_score"])
+
+    def test_missing_learned_artifact_returns_null_shadow_scores(self):
+        item = self.module.score_review_candidate(
+            candidate(risk=0.5),
+            enable_shadow_scoring=True,
+            enable_learned_shadow_scores=True,
+        )
+        self.assertIsNone(item["shadow_scores"]["learned_boundary_shape_only_score"])
+        self.assertIsNone(item["shadow_scores"]["learned_current_plus_boundary_shape_score"])
+        self.assertEqual("not_configured", item["shadow_score_metadata"]["artifact_validation_status"])
+
+    def test_gt_only_fields_do_not_change_shadow_scores(self):
+        base = candidate(risk=0.2, delta_major=False)
+        changed = candidate(risk=0.2, delta_major=True)
+        changed["boundary_metadata"] = {"thin_structure_score": 999.0}
+        first = self.module.score_review_candidate(base, enable_shadow_scoring=True)
+        second = self.module.score_review_candidate(changed, enable_shadow_scoring=True)
+        self.assertEqual(first["shadow_scores"], second["shadow_scores"])
+
+    def test_feature_flag_on_preserves_rank_bucket_and_sorting(self):
+        records = [candidate(idx=1, risk=0.1), candidate(idx=2, risk=0.9), candidate(idx=3, risk=0.5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            default = self.module.build_segmentation_review_queue(records, str(root / "default.jsonl"))["items"]
+            shadow = self.module.build_segmentation_review_queue(
+                records,
+                str(root / "shadow.jsonl"),
+                enable_shadow_scoring=True,
+                enable_learned_shadow_scores=True,
+            )["items"]
+            self.assertEqual([item["task_id"] for item in default], [item["task_id"] for item in shadow])
+            self.assertEqual([item["priority_score"] for item in default], [item["priority_score"] for item in shadow])
+            self.assertEqual([item["rank"] for item in default], [item["rank"] for item in shadow])
+            self.assertEqual([item["priority_bucket"] for item in default], [item["priority_bucket"] for item in shadow])
+            self.assertTrue(all(item["shadow_scores"]["shadow_only"] for item in shadow))
+            self.assertTrue(all(not item["shadow_score_metadata"]["affects_default_ranking"] for item in shadow))
+
+    def test_env_feature_flag_default_off_and_on_only_appends_shadow_fields(self):
+        records = [candidate(idx=1, risk=0.1), candidate(idx=2, risk=0.9)]
+        env = {
+            "SEGMENTATION_ENABLE_BOUNDARY_SHAPE_SHADOW": "true",
+            "SEGMENTATION_ENABLE_LEARNED_BOUNDARY_SHAPE_SHADOW": "true",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.dict(os.environ, {}, clear=True):
+                default = self.module.build_segmentation_review_queue(records, str(root / "default.jsonl"))["items"]
+            with patch.dict(os.environ, env, clear=True):
+                shadow = self.module.build_segmentation_review_queue(records, str(root / "shadow.jsonl"))["items"]
+            stripped = [
+                {key: value for key, value in item.items() if key not in {"shadow_scores", "shadow_score_metadata"}}
+                for item in shadow
+            ]
+            self.assertEqual(default, stripped)
+            self.assertTrue(all("shadow_scores" in item for item in shadow))
+            self.assertTrue(all(item["shadow_score_metadata"]["artifact_validation_status"] == "not_configured" for item in shadow))
 
     def test_review_queue_records_weight_preset(self):
         item = self.module.score_review_candidate(candidate(risk=0.5), weight_preset="current")

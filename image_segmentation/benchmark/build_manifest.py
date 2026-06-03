@@ -14,6 +14,8 @@ from image_segmentation.benchmark.datasets.open_images import iter_open_images_m
 from image_segmentation.benchmark.sampling import sample_manifest_rows
 from image_segmentation.benchmark.schema import validate_manifest_sample
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 def build_manifest(config_path: str, output_path: str, summary_output: str | None = None) -> dict:
     config = load_config(config_path)
@@ -206,7 +208,7 @@ def _num(value: Any) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build a Benchmark v0.1 JSONL manifest.")
     parser.add_argument("--config", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output")
     parser.add_argument("--summary-output")
     return parser
 
@@ -214,7 +216,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        summary = build_manifest(args.config, args.output, summary_output=args.summary_output)
+        output = args.output
+        summary_output = args.summary_output
+        if not output:
+            config = load_config(args.config)
+            benchmark_id = str(config.get("benchmark_id") or Path(args.config).stem)
+            output = str(ROOT / "demo_data" / "model_state" / "image_segmentation" / "benchmark" / f"{benchmark_id}_manifest.jsonl")
+            summary_output = summary_output or str(
+                ROOT / "demo_data" / "model_state" / "image_segmentation" / "benchmark" / f"{benchmark_id}_manifest_summary.json"
+            )
+        summary = build_manifest(args.config, output, summary_output=summary_output)
     except Exception as exc:
         print(f"[ERROR] {exc}")
         return 1

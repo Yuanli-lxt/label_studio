@@ -10,6 +10,7 @@ from image_segmentation.benchmark.prediction_feature_scoring import (
     calibrated_boundary_shape_score,
     prediction_features,
 )
+from image_segmentation.benchmark.shadow_scoring import attach_shadow_scores, shadow_score_metadata, shadow_scores_for_item
 
 
 DEFAULT_SCORE_WEIGHTS = {
@@ -50,6 +51,10 @@ def score_review_candidate(
     weights: Optional[dict] = None,
     weight_preset: Optional[str] = None,
     weight_presets_file: Optional[str] = None,
+    enable_shadow_scoring: Optional[bool] = None,
+    learned_artifact_dir: Optional[str] = None,
+    enable_learned_shadow_scores: Optional[bool] = None,
+    enable_gated_shadow_scores: Optional[bool] = None,
 ) -> dict:
     score_weights, preset_name = _resolve_score_weights(weights, weight_preset, weight_presets_file)
     correction_risk = correction_risk if isinstance(correction_risk, dict) else _record_correction_risk(record)
@@ -63,7 +68,18 @@ def score_review_candidate(
         "diversity_score": 0.0,
     }
     reasons = _review_reasons(record, correction_risk, components)
-    return _queue_item(record, correction_risk, components, score_weights, reasons, preset_name)
+    return _queue_item(
+        record,
+        correction_risk,
+        components,
+        score_weights,
+        reasons,
+        preset_name,
+        enable_shadow_scoring=enable_shadow_scoring,
+        learned_artifact_dir=learned_artifact_dir,
+        enable_learned_shadow_scores=enable_learned_shadow_scores,
+        enable_gated_shadow_scores=enable_gated_shadow_scores,
+    )
 
 
 def build_segmentation_review_queue(
@@ -73,6 +89,10 @@ def build_segmentation_review_queue(
     weights: Optional[dict] = None,
     weight_preset: Optional[str] = None,
     weight_presets_file: Optional[str] = None,
+    enable_shadow_scoring: Optional[bool] = None,
+    learned_artifact_dir: Optional[str] = None,
+    enable_learned_shadow_scores: Optional[bool] = None,
+    enable_gated_shadow_scores: Optional[bool] = None,
 ) -> dict:
     rows = [row for row in records if isinstance(row, dict)]
     score_weights, preset_name = _resolve_score_weights(weights, weight_preset, weight_presets_file)
@@ -97,12 +117,24 @@ def build_segmentation_review_queue(
         if record.get("record_status") == "skipped" and not record.get("mask_quality") and not record.get("review"):
             skipped += 1
             continue
-        item = score_review_candidate(record, weights=score_weights, weight_preset=preset_name)
+        item = score_review_candidate(
+            record,
+            weights=score_weights,
+            weight_preset=preset_name,
+            enable_shadow_scoring=False,
+        )
         item["_input_index"] = index
         item["_diversity_bin"] = _diversity_bin(record, item)
         scored.append(item)
 
     selected = _apply_diversity_order(scored, score_weights, max_items)
+    selected = attach_shadow_scores(
+        selected,
+        learned_artifact_dir=learned_artifact_dir,
+        enable_shadow_scoring=enable_shadow_scoring,
+        enable_learned_shadow_scores=enable_learned_shadow_scores,
+        enable_gated_shadow_scores=enable_gated_shadow_scores,
+    )
     for rank, item in enumerate(selected, start=1):
         item["rank"] = rank
         item.pop("_input_index", None)
@@ -169,9 +201,13 @@ def _queue_item(
     weights: dict,
     reasons: list[str],
     weight_preset: str = DEFAULT_REVIEW_WEIGHT_PRESET,
+    enable_shadow_scoring: Optional[bool] = None,
+    learned_artifact_dir: Optional[str] = None,
+    enable_learned_shadow_scores: Optional[bool] = None,
+    enable_gated_shadow_scores: Optional[bool] = None,
 ) -> dict:
     priority = _weighted_score(components, weights)
-    return {
+    item = {
         "rank": None,
         "task_id": record.get("task_id"),
         "dataset": record.get("dataset"),
@@ -199,6 +235,20 @@ def _queue_item(
             "delta": record.get("delta") if isinstance(record.get("delta"), dict) else None,
         },
     }
+    if _shadow_scoring_enabled(enable_shadow_scoring):
+        item["shadow_scores"] = shadow_scores_for_item(
+            item,
+            learned_artifact_dir=learned_artifact_dir,
+            enable_learned_shadow_scores=enable_learned_shadow_scores,
+            enable_gated_shadow_scores=enable_gated_shadow_scores,
+        )
+        item["shadow_score_metadata"] = shadow_score_metadata(
+            item,
+            learned_artifact_dir=learned_artifact_dir,
+            enable_learned_shadow_scores=enable_learned_shadow_scores,
+            enable_gated_shadow_scores=enable_gated_shadow_scores,
+        )
+    return item
 
 
 def _summary(
@@ -444,6 +494,16 @@ def _priority_bucket(score: float) -> str:
     if score >= 0.40:
         return "medium"
     return "low"
+
+
+def _shadow_scoring_enabled(value: Optional[bool]) -> bool:
+    if value is not None:
+        return bool(value)
+    for name in ("SEGMENTATION_ENABLE_BOUNDARY_SHAPE_SHADOW", "IMAGE_SEG_ENABLE_SHADOW_SCORING"):
+        raw = os.getenv(name)
+        if raw is not None:
+            return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _bbox_aspect(bbox: Any) -> float:

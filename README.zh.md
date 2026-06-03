@@ -64,8 +64,26 @@ python -m image_segmentation.benchmark.run_benchmark \
 输出：
 - `predictions.jsonl`：模型预标注 mask，包含 Layer 1 质量/review 元数据和可选 Layer 2 不确定性。
 - `correction_delta_dataset.jsonl`：模型与 COCO GT 的修正差异，标记为 `public_gt_simulated_human_annotation`。
-- `review_queue.jsonl`：Layer 5 优先级队列，其中 delta 仅用于 `evaluation_only`。
+- `review_queue.jsonl`：Layer 5 优先级队列，其中 delta 仅用于 `evaluation_only`。实验性的 `shadow_scores` 可能包含 boundary/shape、learned fusion 和 gated fusion 分数；这些字段只用于 shadow 观察，不影响默认 priority score、rank、bucket 或 review queue 排序。
 - `evaluation_report.json` 和 `evaluation_report.md`：机器可读与人类可读指标。
+
+learned boundary/shape 的 shadow-only 观察流程见 `docs/segmentation_shadow_scoring_rollout.md`。live runner 支持单窗口或多窗口，production mode 下使用 `--no-labels`，逐窗口验证默认字段和排序不变，汇总 drift/alert，并导出 safe disagreement packet 供人工 review：
+
+```bash
+.venv/bin/python -m image_segmentation.benchmark.live_shadow_rollout \
+  --input-dir <production_queue_dir> \
+  --window-glob "review_queue_*.jsonl" \
+  --output-root demo_data/model_state/image_segmentation/benchmark/production_shadow_expanded_observation \
+  --artifact-dir <artifact_dir> \
+  --enable-learned-boundary-shape-shadow \
+  --production-mode \
+  --no-labels \
+  --max-windows 5
+```
+
+该流程仅用于 shadow-only observation：不得修改默认 Layer 5 weights，不得改变默认 review queue 排序，也不得把人审 outcome 或 evaluation-only 字段接入 production scoring。扩量观察会输出逐窗口报告、`expanded_shadow_multi_window_summary.json/.md` 和 `production_shadow_expanded_rollout_decision_report.md`。可选人审反馈导入仅用于离线分析：`image_segmentation.benchmark.summarize_shadow_human_feedback`。
+
+更大范围 broader shadow observation 使用同一个 runner，至少处理 10 个窗口，输出 `production_shadow_broader_observation`、`broader_shadow_multi_window_summary.json/.md`、`human_review_task_packet/` 和 `production_shadow_broader_rollout_decision_report.md`。Broader summary 会标记 p95 drift 超过 baseline `1.0` 个标准差的 outlier window，用于检查 dataset/queue mix 变化，不能作为 promotion 依据。
 
 报告指标：
 - model/GT IoU、Dice、precision 和 recall 衡量预标注 mask 相对公开 ground truth 的质量。
@@ -591,6 +609,94 @@ python -m image_segmentation.benchmark.learn_boundary_shape_fusion \
 
 learned fusion 会比较 `current_full_priority`、`risk_only`、`risk_heavy`、`boundary_shape_experimental`、`boundary_shape_rank_score`、`boundary_shape_calibrated_score`、`learned_boundary_shape_only` 和 `learned_current_plus_boundary_shape`。每个 fold 的 scaler/model 只在 train fold fit，validation fold 只 transform/predict；如果没有 scikit-learn，会使用 numpy logistic fallback。
 
+### Boundary/Shape Shadow Scoring
+
+Boundary/shape shadow scoring 是 production-adjacent、shadow-only 的 rollout 路径，用于记录 prediction-time boundary features 和 learned boundary/shape artifact 的分数。Review queue 生成中默认关闭。开启后只会在默认 Layer 5 打分和排序完成之后，为 queue item 增加 `shadow_scores` 和 `shadow_score_metadata`。
+
+Feature flags：
+
+```bash
+SEGMENTATION_ENABLE_BOUNDARY_SHAPE_SHADOW=false
+SEGMENTATION_ENABLE_LEARNED_BOUNDARY_SHAPE_SHADOW=false
+SEGMENTATION_BOUNDARY_SHAPE_ARTIFACT_DIR=
+SEGMENTATION_BOUNDARY_SHAPE_ARTIFACT_REGISTRY=
+SEGMENTATION_BOUNDARY_SHAPE_ARTIFACT_VERSION=
+SEGMENTATION_BOUNDARY_SHAPE_SHADOW_VERSION=boundary_shape_shadow_v1
+SEGMENTATION_BOUNDARY_SHAPE_FAIL_OPEN=true
+```
+
+Shadow 输出保持稳定契约：`shadow_only: true`、`affects_default_ranking: false`、`score_version`、calibrated/rank boundary scores、显式配置 artifact 后的 learned scores，以及 artifact validation status、missing safe feature count、inference error 等 metadata。Shadow scores 不会修改 `priority_score`、`rank`、`priority_bucket`、默认 Layer 5 weights 或默认排序 key。
+
+Learned artifact 支持显式目录，也支持 registry：
+
+```text
+artifacts/segmentation/boundary_shape/
+  learned_boundary_shape_only_v1/
+    learned_boundary_shape_only_model.pkl
+    learned_current_plus_boundary_shape_model.pkl
+    feature_schema.json
+    model_metadata.json
+    validation_report.json
+  CURRENT
+```
+
+`CURRENT` 写入当前启用的 artifact version。Rollback 可以通过切换配置或修改 `CURRENT` 完成。Artifact metadata 必须保持 shadow-only，并声明 `affects_default_ranking: false`。Feature schema 会拒绝 GT-derived / evaluation-only 字段，包括 GT mask/path、IoU/Dice、boundary metrics、correction delta、severity/major-correction label、dataset GT-only metadata 和 `boundary_metadata`。
+
+Fail-safe 行为：未配置 artifact 时 learned score 为 null，`artifact_validation_status: not_configured`；路径缺失、load 失败、schema mismatch 或 inference error 时，在 `SEGMENTATION_BOUNDARY_SHAPE_FAIL_OPEN=true` 下 learned score 为 null 并记录错误 metadata，主队列生成继续。显式 validation 可用 `python -m image_segmentation.benchmark.learn_boundary_shape_fusion --validate-artifact ...` 或 `validate_artifact_for_shadow(...)`，schema/load failure 会报错。
+
+运行 monitoring：
+
+```bash
+python -m image_segmentation.benchmark.compare_shadow_scores \
+  --review-queue <review_queue.shadow_scored.jsonl> \
+  --output-dir <output_dir>/shadow_monitoring \
+  --window-id <production-window-id> \
+  --baseline <previous_shadow_monitoring.json> \
+  --production-mode \
+  --no-labels
+```
+
+Monitoring 输出 `shadow_monitoring.json`、`shadow_monitoring.md` 和 `shadow_disagreement_examples.jsonl`，包含 coverage、score distribution 和 drift、current-vs-shadow rank agreement、top-k overlap/Jaccard、disagreement volume/examples、latency 字段、alert checks，以及 safety metadata。Latency 包括可用时的 queue generation latency、shadow scoring 总耗时、monitoring 耗时、review packet export 耗时、可分离时的 artifact load latency，以及 per-item p50/p95/p99/mean/max；不可测字段保持 `null`。Production mode 不读取 label 或 `evaluation_only` 字段。Offline label metrics 只能在非 production mode 中计算，并标记为 `evaluation_only`。Promotion 需要真实 shadow feedback、artifact validation clean、跨数据集稳定、无 leakage finding，并经过显式 review；当前 rollout 不是默认排序或权重 promotion。
+
+Broader human review task packet 导出 safe-only JSONL 分组：`high_learned_low_current`、`high_current_low_learned`、`top_learned` 和 `control_current_top`。人审反馈行可以包含 `group`、`human_review_outcome`、`reviewer`、`reviewed_at` 和 `notes`；offline summary 会报告分组 correction rate、hit rate、learned 相对 control 的 lift、unclear rate、examples，以及可用时的 reviewer agreement。人审 outcome 不得进入 production scoring 或默认排序。
+
+当 broader rollout 触发非硬性 drift、missing-feature 或 top-k alert 时，先运行离线 root-cause 工具，不要继续扩大：
+
+```bash
+python -m image_segmentation.benchmark.analyze_shadow_drift --multi-window-root <broader_root> --baseline-window window_001 --windows window_004 window_007 --output-dir <broader_root>/drift_root_cause
+python -m image_segmentation.benchmark.analyze_shadow_missing_features --multi-window-root <broader_root> --windows window_001 window_004 --output-dir <broader_root>/missing_feature_analysis
+python -m image_segmentation.benchmark.analyze_shadow_topk_jaccard --multi-window-root <broader_root> --baseline-window window_001 --windows window_002 window_004 window_005 window_007 --output-dir <broader_root>/topk_jaccard_analysis
+python -m image_segmentation.benchmark.build_shadow_human_review_assignment --task-packet-dir <broader_root>/human_review_task_packet --output-dir <broader_root>/human_review_assignment
+```
+
+这些报告只使用 safe fields。非硬性 alert 会阻断扩量，直到原因解释清楚；但如果默认字段/排序不变、production labels 未读取、artifact validation clean、shadow score 仍完全隔离，就不需要 rollback。
+
+Replay 和人工 review packet：
+
+```bash
+python -m image_segmentation.benchmark.apply_shadow_scores \
+  --review-queue <input_review_queue.jsonl> \
+  --output <output_review_queue.shadow_scored.jsonl> \
+  --artifact-dir <artifact_dir> \
+  --enable-learned-boundary-shape-shadow
+
+python -m image_segmentation.benchmark.export_shadow_review_packet \
+  --review-queue <output_review_queue.shadow_scored.jsonl> \
+  --output-dir <output_dir>/shadow_review_packet \
+  --top-k 50 \
+  --production-mode
+```
+
+初始告警阈值：learned null rate 大于 `0.05`、active artifact status 任意非 `valid`、inference error rate 大于 `0.01`、missing safe feature p95 大于 `0`、queue generation latency regression 大于 `10%`、配置的 shadow scoring p95 或 artifact load latency 阈值、p95 分布漂移大于 baseline `3` 个 std、top100 Jaccard 相对变化大于 `50%`、任意 `shadow_only != true`，或任意 `affects_default_ranking != false`。
+
+启用 shadow rollout 前，需要确认 artifact validation 通过、feature flag 默认关闭、fail-open 已测试、默认排序 equality 已测试、monitoring 可运行、rollback 路径已测试，并定义告警阈值。Rollout 期间跟踪 learned coverage、null rate、load failure、inference error、分布漂移/outlier、top-k overlap、disagreement 量、人审反馈分组 hit rate、learned 相对 control 的 lift，以及可测量的 latency overhead。Rollback 可通过关闭 learned shadow、关闭 boundary/shape shadow、清空 artifact env、切换 artifact version、修改 registry `CURRENT` 或 redeploy 旧配置完成。Promotion 需要稳定 live coverage、低 null/error rate、无 latency regression、无 leakage finding、跨窗口分布稳定、人工 review disagreement 有价值，以及代表性 production traffic 上的 label-backed lift。
+
+完整 runbook：`docs/segmentation_shadow_scoring_rollout.md`。
+#### 结果总结
+Decision: continue current shadow traffic and allow small controlled expansion.
+Do not promote defaults yet: keep Layer 5 weights and default sorting unchanged.
+Reason: 3 个窗口稳定，coverage/null/inference safety 全绿，没有 distribution drift alert，也没有 production label read 或 ordering/default equality 破坏；但仍缺少 label-backed / human-feedback-backed usefulness evidence、稳定 latency instrumentation、以及人工 disagreement review 的有效性闭环。
+
 ### 三方比较
 
 ```bash
@@ -676,6 +782,12 @@ scripts/run_image_segmentation_validation_gate.sh
 - 未实现 SAM2。
 - 不会自动判断标签正确性。
 - 图像检测和文本 NER 仍是确定性规则 demo 路径，不属于本文档范围。
+
+## Schema-aware shadow 分析
+
+broader rollout 窗口需要先运行 `classify_shadow_windows`，再用 `--schema-aware --classification <shadow_window_classification.json>` 运行 drift、top-k Jaccard 和 missing-feature 分析。schema-aware 报告会区分 `stability_alert` 与 `compatibility_warning`：旧 schema fallback、混合 schema、same-sample overlap 为 0 的窗口不能直接作为默认 promotion 证据。没有 hard safety alert 时可以谨慎恢复 same shadow traffic；small expansion、broader expansion、默认排序和 Layer 5 权重 promotion 仍需等待可比较窗口稳定性与人审反馈证据。
+
+受控可比较窗口验证先运行 `select_comparable_shadow_windows`，再对 `selected_shadow_window_classification.json` 运行 schema-aware drift / top-k / missing-feature 分析。用 `prepare_controlled_human_review_assignment` 生成只含安全字段的离线人审包。若 full-feature 受控窗口仍有 stability alert，则继续 hold small expansion；若受控窗口稳定但没有人审反馈，也只继续 same-scope shadow observation，不做默认 promotion。
 
 ## 停止服务
 

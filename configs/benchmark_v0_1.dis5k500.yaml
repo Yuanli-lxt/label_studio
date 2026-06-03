@@ -1,0 +1,27 @@
+benchmark_id: larger_rerun_dis5k500_shadow_ci
+random_seed: 42
+max_samples_total: 500
+
+datasets:
+  dis5k:
+    enabled: true
+    images_dir: data/external/dis5k/images
+    masks_dir: data/external/dis5k/masks
+    max_samples: 500
+    image_glob: "*.*"
+    mask_glob: "*.png"
+    mask_match_strategy: same_stem
+    category_name: foreground_object
+    category_id: foreground_object
+
+sampling:
+  strategy: stratified
+  image_diversity: true
+  include_tags:
+    - small_object
+    - medium_object
+    - large_object
+    - touches_border
+    - elongated_object
+    - thin_structure
+    - high_boundary_complexity
