@@ -810,6 +810,34 @@ class BenchmarkAblateReviewWeightsTests(unittest.TestCase):
             self.assertFalse(result["feedback_available"])
             self.assertEqual({}, result["outcome_counts"])
 
+    def test_shadow_human_feedback_examples_require_reviewed_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            packet = root / "feedback.jsonl"
+            rows = [
+                {
+                    "sample_id": "a",
+                    "group": "high_learned_low_current",
+                    "learned_shadow_score": 0.9,
+                    "current_priority_score": 0.1,
+                    "human_review_outcome": None,
+                },
+                {
+                    "sample_id": "b",
+                    "group": "top_learned",
+                    "learned_shadow_score": 0.8,
+                    "current_priority_score": 0.2,
+                    "human_review_outcome": "",
+                },
+            ]
+            packet.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            result = summarize_shadow_human_feedback(str(packet), str(root / "summary"))
+            examples = read_jsonl(root / "summary" / "human_feedback_examples.jsonl")
+            self.assertEqual(0, result["total_reviewed"])
+            self.assertEqual([], result["learned_found_missed_risks"])
+            self.assertEqual([], result["learned_over_prioritized"])
+            self.assertEqual([], examples)
+
     def test_shadow_root_cause_analysis_outputs_schema_and_safe_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

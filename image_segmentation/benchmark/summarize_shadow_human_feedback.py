@@ -57,7 +57,8 @@ def summarize_shadow_human_feedback(review_packet: str, output_dir: str) -> dict
         ),
         "learned_over_prioritized": _examples(
             rows,
-            lambda row: not _is_hit(row)
+            lambda row: _reviewed(row)
+            and not _is_hit(row)
             and _group(row) in {"high_learned_low_current", "top_learned"},
         ),
         "inter_reviewer_agreement": _inter_reviewer_agreement(rows),
@@ -131,7 +132,7 @@ def _bucket_rates(rows: list[dict], score_field: str) -> list[dict]:
 
 
 def _hit_rate(rows_iter) -> dict:
-    rows = [row for row in rows_iter if str(row.get("human_review_outcome") or "").strip()]
+    rows = [row for row in rows_iter if _reviewed(row)]
     hits = sum(_is_hit(row) for row in rows)
     return {"count": len(rows), "hits": hits, "hit_rate": float(hits / len(rows)) if rows else None}
 
@@ -140,7 +141,7 @@ def _group_metrics(rows: list[dict]) -> dict:
     metrics = {}
     for group in GROUPS:
         group_rows = [row for row in rows if _group(row) == group]
-        reviewed = [row for row in group_rows if str(row.get("human_review_outcome") or "").strip()]
+        reviewed = [row for row in group_rows if _reviewed(row)]
         major = sum(_is_major(row) for row in reviewed)
         major_or_minor = sum(_is_hit(row) for row in reviewed)
         metrics[group] = {
@@ -184,7 +185,7 @@ def _missed_risk_discovery_rate(group_metrics: dict) -> dict:
 def _over_prioritization_rate(rows: list[dict]) -> dict:
     group_rows = [
         row for row in rows
-        if _group(row) == "high_learned_low_current" and str(row.get("human_review_outcome") or "").strip()
+        if _group(row) == "high_learned_low_current" and _reviewed(row)
     ]
     ok = sum(str(row.get("human_review_outcome") or "").strip().lower() == "ok" for row in group_rows)
     return {"count": len(group_rows), "ok": ok, "rate": float(ok / len(group_rows)) if group_rows else None}
@@ -256,6 +257,10 @@ def _dedupe_key(row: dict) -> str:
 
 def _is_hit(row: dict) -> bool:
     return str(row.get("human_review_outcome") or "").strip().lower() in OUTCOMES_NEEDING_CORRECTION
+
+
+def _reviewed(row: dict) -> bool:
+    return bool(str(row.get("human_review_outcome") or "").strip())
 
 
 def _is_major(row: dict) -> bool:
