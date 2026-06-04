@@ -113,6 +113,51 @@ This path is shadow-only: it must not modify default Layer 5 weights, default re
 
 Broader shadow observation uses the same runner with at least 10 windows and writes `production_shadow_broader_observation`, `broader_shadow_multi_window_summary.json/.md`, `human_review_task_packet/`, and `production_shadow_broader_rollout_decision_report.md`. Broader summaries flag p95 drift outliers above `1.0` baseline standard deviations so dataset or queue-mix shifts can be inspected before any promotion discussion.
 
+## Segmentation Balanced Human Review Pilot
+
+The first real-human validation pilot uses four balanced groups with 15 samples each, for 60 Label Studio segmentation tasks:
+
+- `high_learned_low_current`
+- `high_current_low_learned`
+- `top_learned`
+- `control_current_top`
+
+This pilot validates whether learned boundary/shape shadow scoring adds useful review signal. It does not change default Layer 5 weights, default `review_queue.jsonl` sorting, or production scoring.
+
+Prepare the pilot from a shadow-scored queue:
+
+```bash
+.venv/bin/python -m image_segmentation.benchmark.prepare_balanced_pilot_review \
+  --review-queue <shadow_scored_review_queue.jsonl> \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04 \
+  --per-group 15 \
+  --pilot-id segmentation_balanced_pilot_2026_06_04
+```
+
+Import into Label Studio:
+
+```bash
+export LABEL_STUDIO_URL=http://localhost:18080
+export LABEL_STUDIO_API_TOKEN='<your-token>'
+
+scripts/bootstrap_label_studio_image_segmentation_review.py
+scripts/import_image_segmentation_review_tasks_to_label_studio.py \
+  --tasks-path demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04/label_studio_tasks.json \
+  --dry-run
+scripts/import_image_segmentation_review_tasks_to_label_studio.py \
+  --tasks-path demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04/label_studio_tasks.json
+```
+
+After review, fill `human_review_outcome` in `review_assignment.jsonl` or the assignment CSV, then summarize offline feedback:
+
+```bash
+.venv/bin/python -m image_segmentation.benchmark.summarize_shadow_human_feedback \
+  --review-packet demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04/review_assignment.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04/human_feedback_summary
+```
+
+Human feedback remains offline-only and must not feed production scoring or default sorting.
+
 Report metrics:
 - model/GT IoU, Dice, precision, and recall measure pre-label mask quality against public ground truth.
 - major correction rate and severity distribution summarize how often simulated human correction is substantial.

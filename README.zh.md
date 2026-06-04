@@ -85,6 +85,51 @@ learned boundary/shape 的 shadow-only 观察流程见 `docs/segmentation_shadow
 
 更大范围 broader shadow observation 使用同一个 runner，至少处理 10 个窗口，输出 `production_shadow_broader_observation`、`broader_shadow_multi_window_summary.json/.md`、`human_review_task_packet/` 和 `production_shadow_broader_rollout_decision_report.md`。Broader summary 会标记 p95 drift 超过 baseline `1.0` 个标准差的 outlier window，用于检查 dataset/queue mix 变化，不能作为 promotion 依据。
 
+## Segmentation Balanced Human Review Pilot
+
+第一轮人工 review 验证使用 4 组平衡抽样，每组 15 个样本，总计 60 个 Label Studio 分割任务：
+
+- `high_learned_low_current`
+- `high_current_low_learned`
+- `top_learned`
+- `control_current_top`
+
+该 pilot 只验证 learned boundary/shape shadow signal 是否能补充当前默认 Layer 5 排序。默认权重、默认 `review_queue.jsonl` 排序和 production scoring 都保持不变。
+
+从 shadow-scored queue 准备 pilot：
+
+```bash
+.venv/bin/python -m image_segmentation.benchmark.prepare_balanced_pilot_review \
+  --review-queue <shadow_scored_review_queue.jsonl> \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04 \
+  --per-group 15 \
+  --pilot-id segmentation_balanced_pilot_2026_06_04
+```
+
+导入 Label Studio：
+
+```bash
+export LABEL_STUDIO_URL=http://localhost:18080
+export LABEL_STUDIO_API_TOKEN='<your-token>'
+
+scripts/bootstrap_label_studio_image_segmentation_review.py
+scripts/import_image_segmentation_review_tasks_to_label_studio.py \
+  --tasks-path demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04/label_studio_tasks.json \
+  --dry-run
+scripts/import_image_segmentation_review_tasks_to_label_studio.py \
+  --tasks-path demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04/label_studio_tasks.json
+```
+
+人工 review 后，将 `human_review_outcome` 填回 `review_assignment.jsonl` 或 assignment CSV，再运行离线汇总：
+
+```bash
+.venv/bin/python -m image_segmentation.benchmark.summarize_shadow_human_feedback \
+  --review-packet demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04/review_assignment.jsonl \
+  --output-dir demo_data/model_state/image_segmentation/benchmark/segmentation_balanced_pilot_2026_06_04/human_feedback_summary
+```
+
+安全约束：人工结果只用于离线分析，不得接入 production scoring，不得修改默认 Layer 5 weights 或默认排序。
+
 报告指标：
 - model/GT IoU、Dice、precision 和 recall 衡量预标注 mask 相对公开 ground truth 的质量。
 - major correction rate 和 severity distribution 总结模拟人工修正的显著程度与出现频率。
