@@ -184,7 +184,7 @@ def normalize_task_for_import(task: Dict[str, Any]) -> Dict[str, Any]:
     data = task.get("data") if isinstance(task.get("data"), dict) else None
     if data is None:
         data = {}
-        for key in ("image", "caption"):
+        for key in ("image", "gt_reference", "mobilesam_preview", "caption"):
             if task.get(key) is not None:
                 data[key] = task[key]
     normalized: Dict[str, Any] = {"data": data}

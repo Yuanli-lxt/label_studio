@@ -331,8 +331,10 @@ def _parse_label_config(label_config):
 
     for node in root.iter():
         node_type = _local_tag(node.tag)
-        if node_type == "Image" and parsed["image_name"] == "image":
-            parsed["image_name"] = node.attrib.get("name", "image")
+        if node_type == "Image":
+            image_name = node.attrib.get("name", "image")
+            if image_name == "image" or parsed["image_name"] == "image":
+                parsed["image_name"] = image_name
         if node_type == "Text" and parsed["text_name"] == "text":
             parsed["text_name"] = node.attrib.get("name", "text")
 

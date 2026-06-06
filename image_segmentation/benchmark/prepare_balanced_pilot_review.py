@@ -88,6 +88,22 @@ def _safe_candidate(row: dict) -> dict:
         "dataset": row.get("dataset"),
         "category_name": row.get("category_name"),
         "image": row.get("image"),
+        "gt_reference": _first_text(
+            row,
+            "gt_reference",
+            "gt_reference_image",
+            "gt_preview",
+            "gt_mask_preview",
+            "gt_mask_reference",
+        ),
+        "mobilesam_preview": _first_text(
+            row,
+            "mobilesam_preview",
+            "mask_preview",
+            "model_mask_preview",
+            "prediction_preview",
+            "preview_image",
+        ),
         "bbox": _prompt_bbox(row),
         "current_priority_score": _num(row.get("priority_score")),
         "learned_shadow_score": _shadow_value(row, "learned_boundary_shape_only_score"),
@@ -188,7 +204,12 @@ def _assert_group_counts(rows: list[dict], per_group: int) -> None:
 
 
 def _label_studio_task(row: dict, pilot_id: str) -> dict:
-    data = {"image": str(row.get("image")).strip()}
+    image = str(row.get("image")).strip()
+    data = {
+        "image": image,
+        "gt_reference": str(row.get("gt_reference") or image).strip(),
+        "mobilesam_preview": str(row.get("mobilesam_preview") or image).strip(),
+    }
     if row.get("bbox") is not None:
         data["bbox"] = row["bbox"]
 
@@ -223,6 +244,14 @@ def _assert_safe_payload(value: Any) -> None:
 
 def _is_importable(row: dict) -> bool:
     return isinstance(row.get("image"), str) and bool(row["image"].strip()) and row.get("learned_shadow_score") is not None
+
+
+def _first_text(row: dict, *keys: str) -> str | None:
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _rank_map(rows: list[dict], field: str) -> list[int]:

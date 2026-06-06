@@ -54,6 +54,8 @@ class ImportImageSegmentationReviewTasksTests(unittest.TestCase):
         self.assertIsInstance(tasks, list)
         self.assertGreaterEqual(len(tasks), 1)
         self.assertIn("image", tasks[0].get("data", {}))
+        self.assertIn("gt_reference", tasks[0].get("data", {}))
+        self.assertIn("mobilesam_preview", tasks[0].get("data", {}))
 
     def test_import_dedupes_existing_and_batch_duplicates_and_skips_invalid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -62,7 +64,14 @@ class ImportImageSegmentationReviewTasksTests(unittest.TestCase):
                 json.dumps(
                     [
                         {"id": "a", "data": {"image": "/data/local-files/?d=images/existing.png"}},
-                        {"id": "b", "data": {"image": "/data/local-files/?d=images/new.png"}},
+                        {
+                            "id": "b",
+                            "data": {
+                                "image": "/data/local-files/?d=images/new.png",
+                                "gt_reference": "/data/local-files/?d=gt/new.png",
+                                "mobilesam_preview": "/data/local-files/?d=preview/new.png",
+                            },
+                        },
                         {"id": "c", "data": {"image": "/data/local-files/?d=images/new.png"}},
                         {"id": "d", "data": {"caption": "missing image"}},
                     ]
@@ -84,6 +93,11 @@ class ImportImageSegmentationReviewTasksTests(unittest.TestCase):
         self.assertEqual(1, result["pre_validation_invalid"])
         self.assertEqual(1, len(session.import_payloads))
         self.assertEqual("/data/local-files/?d=images/new.png", session.import_payloads[0][0]["data"]["image"])
+        self.assertEqual("/data/local-files/?d=gt/new.png", session.import_payloads[0][0]["data"]["gt_reference"])
+        self.assertEqual(
+            "/data/local-files/?d=preview/new.png",
+            session.import_payloads[0][0]["data"]["mobilesam_preview"],
+        )
 
 
 if __name__ == "__main__":

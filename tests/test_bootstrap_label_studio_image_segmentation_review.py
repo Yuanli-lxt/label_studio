@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from scripts.bootstrap_label_studio_image_segmentation_review import bootstrap_image_segmentation_review
@@ -35,7 +36,14 @@ class BootstrapImageSegmentationReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "seg.xml"
             cfg.write_text(
-                "<View><Image name='image' value='$image'/><BrushLabels name='mask_label' toName='image'/></View>",
+                (
+                    "<View><Image name='gt_reference' value='$gt_reference'/>"
+                    "<Image name='mobilesam_preview' value='$mobilesam_preview'/>"
+                    "<Image name='image' value='$image'/>"
+                    "<BrushLabels name='mask_label' toName='image'/>"
+                    "<Choices name='review_outcome' toName='image' required='true'>"
+                    "<Choice value='No fix'/></Choices></View>"
+                ),
                 encoding="utf-8",
             )
             base = LabelStudioSettings.from_env(require_token=False)
@@ -57,6 +65,21 @@ class BootstrapImageSegmentationReviewTests(unittest.TestCase):
         self.assertIn("<BrushLabels", client.project_args["label_config"])
         self.assertTrue(client.ml_called)
         self.assertTrue(client.webhook_called)
+
+    def test_default_segmentation_config_is_review_form(self):
+        config = Path("label_configs/image_segmentation.xml").read_text(encoding="utf-8")
+        root = ET.fromstring(config)
+        images = {node.attrib.get("name"): node.attrib.get("value") for node in root.iter("Image")}
+        choices = next(node for node in root.iter("Choices") if node.attrib.get("name") == "review_outcome")
+
+        self.assertEqual("$gt_reference", images["gt_reference"])
+        self.assertEqual("$mobilesam_preview", images["mobilesam_preview"])
+        self.assertEqual("$image", images["image"])
+        self.assertEqual("true", choices.attrib.get("required"))
+        self.assertEqual("single", choices.attrib.get("choice"))
+        self.assertEqual(["No fix", "Minor fix", "Major fix", "Redo", "Skip"], [
+            node.attrib.get("value") for node in choices.iter("Choice")
+        ])
 
 
 if __name__ == "__main__":

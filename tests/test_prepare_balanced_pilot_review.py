@@ -21,6 +21,8 @@ def queue_row(idx, *, image=None, current=None, learned=None, sample_id=None, an
         "dataset": "unit",
         "category_name": "Object",
         "image": image or f"/data/local-files/?d=images/unit_{idx}.png",
+        "gt_reference": f"/data/local-files/?d=gt/unit_{idx}.png",
+        "mobilesam_preview": f"/data/local-files/?d=preview/unit_{idx}.png",
         "priority_score": current_score,
         "rank": idx,
         "prompt_bbox": [1, 2, 20, 30],
@@ -80,6 +82,8 @@ class BalancedPilotReviewTests(unittest.TestCase):
             tasks = json.loads(Path(result["outputs"]["label_studio_tasks"]).read_text(encoding="utf-8"))
             self.assertEqual(60, len(tasks))
             self.assertEqual("/data/local-files/?d=images/unit_1.png", tasks[0]["data"]["image"])
+            self.assertEqual("/data/local-files/?d=gt/unit_1.png", tasks[0]["data"]["gt_reference"])
+            self.assertEqual("/data/local-files/?d=preview/unit_1.png", tasks[0]["data"]["mobilesam_preview"])
             self.assertEqual([1, 2, 20, 30], tasks[0]["data"]["bbox"])
             self.assertEqual("unit_pilot", tasks[0]["meta"]["shadow_review_pilot_id"])
             self.assertTrue(tasks[0]["meta"]["shadow_only"])

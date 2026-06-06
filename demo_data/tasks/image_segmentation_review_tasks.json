@@ -3,6 +3,8 @@
     "id": "seg-review-001",
     "data": {
       "image": "/data/local-files/?d=images/demo_blue.png",
+      "gt_reference": "/data/local-files/?d=images/demo_blue.png",
+      "mobilesam_preview": "/data/local-files/?d=images/demo_blue.png",
       "bbox": [179, 47, 284, 118]
     },
     "meta": {
@@ -15,6 +17,8 @@
     "id": "seg-review-002",
     "data": {
       "image": "/data/local-files/?d=images/demo_product_red.png",
+      "gt_reference": "/data/local-files/?d=images/demo_product_red.png",
+      "mobilesam_preview": "/data/local-files/?d=images/demo_product_red.png",
       "bbox": [51, 55, 207, 165]
     },
     "meta": {

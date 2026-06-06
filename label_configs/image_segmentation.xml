@@ -1,6 +1,28 @@
 <View>
-  <Image name="image" value="$image"/>
-  <BrushLabels name="mask_label" toName="image">
-    <Label value="Object" background="#ff6b6b"/>
-  </BrushLabels>
+  <View style="display: grid; grid-template-columns: repeat(3, minmax(240px, 1fr)); gap: 16px; align-items: start;">
+    <View>
+      <Header value="GT reference"/>
+      <Image name="gt_reference" value="$gt_reference"/>
+    </View>
+    <View>
+      <Header value="MobileSAM preview"/>
+      <Image name="mobilesam_preview" value="$mobilesam_preview"/>
+    </View>
+    <View>
+      <Header value="Editable mask"/>
+      <Image name="image" value="$image"/>
+      <BrushLabels name="mask_label" toName="image">
+        <Label value="Object" background="#ff6b6b"/>
+      </BrushLabels>
+    </View>
+  </View>
+
+  <Header value="Review decision"/>
+  <Choices name="review_outcome" toName="image" choice="single" required="true" showInLine="true">
+    <Choice value="No fix"/>
+    <Choice value="Minor fix"/>
+    <Choice value="Major fix"/>
+    <Choice value="Redo"/>
+    <Choice value="Skip"/>
+  </Choices>
 </View>
