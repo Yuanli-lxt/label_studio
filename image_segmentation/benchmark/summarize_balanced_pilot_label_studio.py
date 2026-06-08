@@ -15,6 +15,8 @@ GROUPS = [
 
 OUTCOMES = ["no_fix", "minor_fix", "major_fix", "redo", "skip"]
 
+OUTCOME_FROM_NAMES = {"review_outcome", "correction_effort"}
+
 OUTCOME_ALIASES = {
     "no fix": "no_fix",
     "no_fix": "no_fix",
@@ -124,7 +126,7 @@ def _task_review_outcome(task: dict[str, Any]) -> str | None:
         if not isinstance(result, list):
             continue
         for item in result:
-            if not isinstance(item, dict) or item.get("from_name") != "review_outcome":
+            if not isinstance(item, dict) or item.get("from_name") not in OUTCOME_FROM_NAMES:
                 continue
             value = item.get("value") if isinstance(item.get("value"), dict) else {}
             choices = value.get("choices")
@@ -176,11 +178,17 @@ def _task_keys(task: dict[str, Any]) -> list[str]:
     keys = []
     for value in (task.get("id"), task.get("task_id")):
         if value is not None:
-            keys.append(str(value))
+            text = str(value)
+            keys.append(text)
+            if ":task_id:" in text:
+                keys.append(text.rsplit(":task_id:", 1)[1])
     meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
-    for field in ("sample_id", "task_id"):
+    for field in ("sample_id", "task_id", "prediction_id"):
         if meta.get(field) is not None:
-            keys.append(str(meta[field]))
+            text = str(meta[field])
+            keys.append(text)
+            if text.endswith("_mask"):
+                keys.append(text[: -len("_mask")])
     return keys
 
 

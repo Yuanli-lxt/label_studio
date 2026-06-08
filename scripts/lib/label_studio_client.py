@@ -192,6 +192,8 @@ def normalize_task_for_import(task: Dict[str, Any]) -> Dict[str, Any]:
         normalized["id"] = task.get("id")
     if isinstance(task.get("meta"), dict):
         normalized["meta"] = task["meta"]
+    if isinstance(task.get("predictions"), list):
+        normalized["predictions"] = task["predictions"]
     return normalized
 
 

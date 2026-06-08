@@ -71,6 +71,19 @@ class ImportImageSegmentationReviewTasksTests(unittest.TestCase):
                                 "gt_reference": "/data/local-files/?d=gt/new.png",
                                 "mobilesam_preview": "/data/local-files/?d=preview/new.png",
                             },
+                            "predictions": [
+                                {
+                                    "model_version": "mobile_sam",
+                                    "result": [
+                                        {
+                                            "from_name": "mask_label",
+                                            "to_name": "image",
+                                            "type": "brushlabels",
+                                            "value": {"format": "rle", "rle": [0, 1]},
+                                        }
+                                    ],
+                                }
+                            ],
                         },
                         {"id": "c", "data": {"image": "/data/local-files/?d=images/new.png"}},
                         {"id": "d", "data": {"caption": "missing image"}},
@@ -98,6 +111,7 @@ class ImportImageSegmentationReviewTasksTests(unittest.TestCase):
             "/data/local-files/?d=preview/new.png",
             session.import_payloads[0][0]["data"]["mobilesam_preview"],
         )
+        self.assertEqual("mobile_sam", session.import_payloads[0][0]["predictions"][0]["model_version"])
 
 
 if __name__ == "__main__":

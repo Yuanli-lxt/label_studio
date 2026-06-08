@@ -45,6 +45,23 @@ def label_studio_task(task_id, group, choice):
     }
 
 
+def legacy_coco_label_studio_task(label_studio_id, task_id, group, choice):
+    task = label_studio_task(label_studio_id, group, choice)
+    task["data"] = {
+        "image": f"/data/local-files/?d=first_round/{task_id}.jpg",
+        "review_group": group,
+        "dataset": "COCO",
+    }
+    task["meta"] = {
+        "sample_id": None,
+        "prediction_id": f"{task_id}_mask",
+        "review_group": group,
+        "shadow_review_pilot_id": "segmentation_balanced_pilot_2026_06_04",
+    }
+    task["annotations"][0]["result"][0]["from_name"] = "correction_effort"
+    return task
+
+
 class SummarizeBalancedPilotLabelStudioTests(unittest.TestCase):
     def test_extracts_label_studio_review_outcomes_and_counts_by_group(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,6 +135,78 @@ class SummarizeBalancedPilotLabelStudioTests(unittest.TestCase):
             self.assertEqual(1, summary["groups"]["high_learned_low_current"]["no_fix"])
             self.assertEqual(1, summary["groups"]["high_current_low_learned"]["redo"])
             self.assertEqual(0, summary["groups"]["top_learned"]["total"])
+
+    def test_matches_round2_label_studio_ids_when_sample_id_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assignment = root / "review_assignment.jsonl"
+            export = root / "label_studio_export.json"
+            out = root / "summary"
+            rows = [
+                {
+                    "task_id": "LVIS_130613_34386",
+                    "sample_id": None,
+                    "group": "high_learned_low_current",
+                    "human_review_outcome": None,
+                }
+            ]
+            assignment.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            task = label_studio_task(
+                "segmentation_balanced_pilot_round2_2026_06_07:high_learned_low_current:task_id:LVIS_130613_34386",
+                "high_learned_low_current",
+                "Major fix",
+            )
+            task["meta"]["sample_id"] = None
+            export.write_text(json.dumps([task]), encoding="utf-8")
+
+            summary = summarize_balanced_pilot_reviews(
+                assignment_path=str(assignment),
+                output_dir=str(out),
+                label_studio_export_path=str(export),
+                pilot_id="unit_round2",
+            )
+
+            self.assertEqual(1, summary["reviewed_total"])
+            self.assertEqual(1, summary["groups"]["high_learned_low_current"]["major_fix"])
+
+    def test_matches_legacy_coco_project_by_prediction_id_and_correction_effort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assignment = root / "review_assignment.jsonl"
+            export = root / "label_studio_export.json"
+            out = root / "summary"
+            rows = [
+                {
+                    "task_id": "COCO_29675_1069835",
+                    "sample_id": None,
+                    "group": "high_learned_low_current",
+                    "human_review_outcome": None,
+                }
+            ]
+            assignment.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            export.write_text(
+                json.dumps(
+                    [
+                        legacy_coco_label_studio_task(
+                            14,
+                            "COCO_29675_1069835",
+                            "high_learned_low_current",
+                            "Minor fix",
+                        )
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            summary = summarize_balanced_pilot_reviews(
+                assignment_path=str(assignment),
+                output_dir=str(out),
+                label_studio_export_path=str(export),
+                pilot_id="unit_coco",
+            )
+
+            self.assertEqual(1, summary["reviewed_total"])
+            self.assertEqual(1, summary["groups"]["high_learned_low_current"]["minor_fix"])
 
 
 if __name__ == "__main__":
