@@ -18,7 +18,8 @@ demo_data/model_state/text_classifier/
 demo_data/model_state/image_classifier/
 demo_data/
 demo_data/model_state/image_segmentation/benchmark/
-
+docs/
+ai_label/
 # Local model weights and downloaded checkpoints
 models/
 data/external/
